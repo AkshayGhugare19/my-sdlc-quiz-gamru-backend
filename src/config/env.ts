@@ -38,7 +38,7 @@ export const env = {
   jwt: {
     accessSecret: required('JWT_ACCESS_SECRET', 'dev-access-secret'),
     refreshSecret: required('JWT_REFRESH_SECRET', 'dev-refresh-secret'),
-    accessTtl: optional('JWT_ACCESS_TTL', '15m'),
+    accessTtl: optional('JWT_ACCESS_TTL', '1d'),
     refreshTtl: optional('JWT_REFRESH_TTL', '30d'),
     gameSessionSecret: required('GAME_SESSION_SECRET', 'dev-game-session-secret'),
   },
