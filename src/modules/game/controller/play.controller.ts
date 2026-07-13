@@ -639,6 +639,16 @@ export async function getGarage(req: Request, res: Response) {
   ]);
   const ownedMap = new Map((owned as any[]).map((g) => [g.accessoryId, g]));
 
+  // DEFAULT accessories are starter gear — grant them on first garage view so
+  // they never sit behind a padlock with no way to earn them.
+  for (const a of accessories as any[]) {
+    if (a.unlockType === 'DEFAULT' && !ownedMap.has(a.id)) {
+      await unlockAccessory(userId, a.id, 'DEFAULT');
+      const granted: any = await GarageItem.findOne({ where: { userId, accessoryId: a.id } });
+      if (granted) ownedMap.set(a.id, granted);
+    }
+  }
+
   // How each accessory is won: mission rewards and/or shop listings.
   const accessoryIds = (accessories as any[]).map((a) => a.id);
   const [rewardLinks, shopListings] = await Promise.all([
@@ -646,12 +656,23 @@ export async function getGarage(req: Request, res: Response) {
     ShopItem.findAll({ where: { organizationId, kind: 'ACCESSORY', targetId: accessoryIds, isActive: true } }),
   ]);
   const missionIds = [...new Set((rewardLinks as any[]).map((r) => r.missionId))];
+  // A mission can be played standalone (MISSION) or from its pillar
+  // (BUNDLE_MISSION) — the unlock plan shows the player's BEST progress across
+  // both flows, so pillar players don't see a zeroed progress bar.
   const [rewardMissions, missionProgress] = await Promise.all([
     Mission.findAll({ where: { id: missionIds } }),
-    Progress.findAll({ where: { userId, entityType: 'MISSION', entityId: missionIds } }),
+    Progress.findAll({ where: { userId, entityType: ['MISSION', 'BUNDLE_MISSION'], entityId: missionIds } }),
   ]);
   const missionMap = new Map((rewardMissions as any[]).map((m) => [m.id, m]));
-  const progressMap = new Map((missionProgress as any[]).map((p) => [p.entityId, p]));
+  const progressMap = new Map<string, any>();
+  for (const p of missionProgress as any[]) {
+    const prev = progressMap.get(p.entityId);
+    const better =
+      !prev ||
+      (p.status === 'COMPLETED' && prev.status !== 'COMPLETED') ||
+      (p.status === prev.status && (p.starsEarned ?? 0) > (prev.starsEarned ?? 0));
+    if (better) progressMap.set(p.entityId, p);
+  }
   const linksByAccessory = new Map<string, any[]>();
   for (const link of rewardLinks as any[]) {
     const list = linksByAccessory.get(link.accessoryId) ?? [];

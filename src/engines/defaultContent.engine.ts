@@ -30,7 +30,15 @@ import {
   MissionQuestion,
   MissionAccessoryReward,
   ShopItem,
+  User,
+  Notification,
 } from '../models';
+
+/** Result of a per-feature default seed: how many rows were inserted vs already there. */
+export interface SeedResult {
+  added: number;
+  skipped: number;
+}
 
 const AVATARS = [
   { key: 'alex', name: 'Alex', isDefault: true },
@@ -199,7 +207,8 @@ export async function hasGameContent(organizationId: string) {
  * Kept separate from ensureDefaultGameContent so it can also backfill orgs
  * that were provisioned before tournaments had their own question pools.
  */
-export async function ensureTournamentQuestionBank(organizationId: string) {
+export async function ensureTournamentQuestionBank(organizationId: string): Promise<SeedResult> {
+  const result: SeedResult = { added: 0, skipped: 0 };
   for (const qDef of TOURNAMENT_QUESTIONS) {
     const [question, created] = await Question.findOrCreate({
       where: { organizationId, prompt: qDef.prompt },
@@ -214,10 +223,219 @@ export async function ensureTournamentQuestionBank(organizationId: string) {
       },
     });
     if (created) {
+      result.added += 1;
       for (let o = 0; o < qDef.options.length; o++) {
         await QuestionOption.create({ questionId: (question as any).id, label: qDef.options[o], isCorrect: o === 0, orderIndex: o });
       }
+    } else {
+      result.skipped += 1;
     }
+  }
+  return result;
+}
+
+// ── Per-feature default seeders ─────────────────────────────────────────────
+// Each is idempotent (findOrCreate on natural keys) and reports how many rows
+// were added vs already existed — they back both the full provisioning below
+// AND the admin console's per-feature "Add Default Data" buttons.
+
+export async function ensureDefaultAvatars(organizationId: string): Promise<SeedResult> {
+  const result: SeedResult = { added: 0, skipped: 0 };
+  for (let i = 0; i < AVATARS.length; i++) {
+    const [, created] = await Avatar.findOrCreate({
+      where: { organizationId, key: AVATARS[i].key },
+      defaults: { organizationId, orderIndex: i, ...AVATARS[i] },
+    });
+    created ? (result.added += 1) : (result.skipped += 1);
+  }
+  return result;
+}
+
+export async function ensureDefaultAccessories(organizationId: string): Promise<SeedResult> {
+  const result: SeedResult = { added: 0, skipped: 0 };
+  for (let i = 0; i < ACCESSORIES.length; i++) {
+    const [, created] = await Accessory.findOrCreate({
+      where: { organizationId, key: ACCESSORIES[i].key },
+      defaults: { organizationId, orderIndex: i, ...ACCESSORIES[i] },
+    });
+    created ? (result.added += 1) : (result.skipped += 1);
+  }
+  return result;
+}
+
+export async function ensureDefaultShopItems(organizationId: string): Promise<SeedResult> {
+  const result: SeedResult = { added: 0, skipped: 0 };
+  // Resolve the accessories the ACCESSORY listings point at (skip if missing).
+  const accs = await Accessory.findAll({ where: { organizationId, key: ['neon_wings', 'victory_trail'] } });
+  const byKey = new Map((accs as any[]).map((a) => [a.key, a.id]));
+  const shopDefs: any[] = [
+    { kind: 'ACCESSORY', name: 'Neon Wings', description: 'Glowing wings for your kart', priceCoins: 150, priceStars: 0, targetId: byKey.get('neon_wings') },
+    { kind: 'ACCESSORY', name: 'Victory Trail', description: 'Leave a sparkling trail behind you', priceCoins: 250, priceStars: 3, targetId: byKey.get('victory_trail') },
+    { kind: 'COUPON', name: 'Coffee Voucher', description: 'A free coffee at the office café', priceCoins: 100, priceStars: 0 },
+    { kind: 'COMPANY_REWARD', name: 'Half-Day Off', description: 'Redeem a half day of leave (admin approval)', priceCoins: 500, priceStars: 10, stock: 5 },
+    { kind: 'TITLE', name: 'Legend Title', description: 'Show the "Legend" title on leaderboards', priceCoins: 300, priceStars: 5 },
+  ];
+  for (const s of shopDefs) {
+    if (s.kind === 'ACCESSORY' && !s.targetId) {
+      result.skipped += 1; // accessory not present in this org — add default accessories first
+      continue;
+    }
+    const [, created] = await ShopItem.findOrCreate({
+      where: { organizationId, name: s.name },
+      defaults: { organizationId, isActive: true, ...s },
+    });
+    created ? (result.added += 1) : (result.skipped += 1);
+  }
+  return result;
+}
+
+export async function ensureDefaultRanks(organizationId: string): Promise<SeedResult> {
+  const result: SeedResult = { added: 0, skipped: 0 };
+  for (const r of RANK_DEFS) {
+    const [rankRow, createdRank] = await Rank.findOrCreate({
+      where: { organizationId, tier: r.tier },
+      defaults: { organizationId, name: r.name, tier: r.tier, minXp: r.minXp, color: r.color },
+    });
+    createdRank ? (result.added += 1) : (result.skipped += 1);
+    for (const lv of r.levels) {
+      const [lvlRow, createdLvl] = await Level.findOrCreate({
+        where: { organizationId, level: lv.level },
+        defaults: { organizationId, rankId: (rankRow as any).id, level: lv.level, minXp: lv.minXp, maxXp: lv.maxXp, title: lv.title },
+      });
+      if (!createdLvl) {
+        await lvlRow.update({ rankId: (rankRow as any).id, minXp: lv.minXp, maxXp: lv.maxXp, title: lv.title });
+      }
+    }
+  }
+  return result;
+}
+
+export async function ensureDefaultBadges(organizationId: string): Promise<SeedResult> {
+  const result: SeedResult = { added: 0, skipped: 0 };
+  for (const b of BADGES) {
+    const [, created] = await Badge.findOrCreate({
+      where: { organizationId, code: b.code },
+      defaults: { organizationId, isAutoGranted: true, ...b },
+    });
+    created ? (result.added += 1) : (result.skipped += 1);
+  }
+  return result;
+}
+
+export async function ensureDefaultLeaderboards(organizationId: string): Promise<SeedResult> {
+  const result: SeedResult = { added: 0, skipped: 0 };
+  const boards = [
+    { name: 'Org XP Leaders', scope: 'ORGANIZATION', period: 'ALL_TIME', metric: 'XP' },
+    { name: 'Org Star Leaders', scope: 'ORGANIZATION', period: 'ALL_TIME', metric: 'STARS' },
+  ];
+  for (const b of boards) {
+    const [, created] = await Leaderboard.findOrCreate({
+      where: { organizationId, name: b.name },
+      defaults: { organizationId, ...b },
+    });
+    created ? (result.added += 1) : (result.skipped += 1);
+  }
+  return result;
+}
+
+export async function ensureDefaultCertificateTemplate(organizationId: string): Promise<SeedResult> {
+  const [, created] = await CertificateTemplate.findOrCreate({
+    where: { organizationId, name: 'SDLC  Champion' },
+    defaults: {
+      organizationId,
+      name: 'SDLC  Champion',
+      layout: { title: 'SDLC  Champion', fields: ['recipient', 'issuedAt', 'stars'], accent: '#22D3EE' },
+    },
+  });
+  return { added: created ? 1 : 0, skipped: created ? 0 : 1 };
+}
+
+export async function ensureDefaultTournament(organizationId: string): Promise<SeedResult> {
+  const [, created] = await Tournament.findOrCreate({
+    where: { organizationId, name: 'Weekly Learning Challenge' },
+    defaults: {
+      organizationId,
+      name: 'Weekly Learning Challenge',
+      description: 'Race the tournament track and earn the most XP this week!',
+      type: 'WEEKLY_CHALLENGE',
+      status: 'ACTIVE',
+      metric: 'XP',
+      startsAt: new Date(),
+      endsAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000),
+      starReward: 10,
+      maxStars: 30,
+      rewardConfig: { '1': { xp: 500, coins: 200 }, '2': { xp: 300 }, '3': { xp: 150 } },
+      gameConfig: DEFAULT_TOURNAMENT_GAME_CONFIG,
+    },
+  });
+  return { added: created ? 1 : 0, skipped: created ? 0 : 1 };
+}
+
+export async function ensureDefaultNotifications(organizationId: string): Promise<SeedResult> {
+  const result: SeedResult = { added: 0, skipped: 0 };
+  const players = await User.findAll({
+    where: { organizationId, role: ['EMPLOYEE', 'GUEST'], status: 'ACTIVE' },
+    attributes: ['id'],
+  });
+  for (const u of players as any[]) {
+    const [, created] = await Notification.findOrCreate({
+      where: { organizationId, userId: u.id, title: 'Welcome to the SDLC Quest! 🏁' },
+      defaults: {
+        organizationId,
+        userId: u.id,
+        title: 'Welcome to the SDLC Quest! 🏁',
+        body: 'Race through the pillars, earn stars and coins, and climb the leaderboards. Start from your dashboard — good luck!',
+        channel: 'IN_APP',
+        status: 'PENDING',
+      },
+    });
+    created ? (result.added += 1) : (result.skipped += 1);
+  }
+  return result;
+}
+
+/** Features the admin console's "Add Default Data" buttons can seed. */
+export const DEFAULTABLE_FEATURES = [
+  'avatars',
+  'accessories',
+  'shop-items',
+  'ranks',
+  'badges',
+  'leaderboards',
+  'certificate-templates',
+  'tournaments',
+  'questions',
+  'notifications',
+] as const;
+
+/** Seed ONE feature's default data (idempotent — existing rows are skipped, never overwritten). */
+export async function seedFeatureDefaults(organizationId: string, feature: string): Promise<SeedResult> {
+  switch (feature) {
+    case 'avatars':
+      return ensureDefaultAvatars(organizationId);
+    case 'accessories':
+      return ensureDefaultAccessories(organizationId);
+    case 'shop-items':
+      return ensureDefaultShopItems(organizationId);
+    case 'ranks':
+      return ensureDefaultRanks(organizationId);
+    case 'badges':
+      return ensureDefaultBadges(organizationId);
+    case 'leaderboards':
+      return ensureDefaultLeaderboards(organizationId);
+    case 'certificate-templates':
+      return ensureDefaultCertificateTemplate(organizationId);
+    case 'tournaments': {
+      const result = await ensureDefaultTournament(organizationId);
+      await ensureTournamentQuestionBank(organizationId); // a tournament needs a question pool
+      return result;
+    }
+    case 'questions':
+      return ensureTournamentQuestionBank(organizationId);
+    case 'notifications':
+      return ensureDefaultNotifications(organizationId);
+    default:
+      throw new Error(`Unknown defaults feature "${feature}"`);
   }
 }
 
@@ -284,89 +502,26 @@ export async function ensureDefaultGameContent(organizationId: string): Promise<
   if (!organizationId) return false;
   if (await hasGameContent(organizationId)) return false;
 
-  // Avatars & accessories
-  for (let i = 0; i < AVATARS.length; i++) {
-    await Avatar.findOrCreate({ where: { organizationId, key: AVATARS[i].key }, defaults: { organizationId, orderIndex: i, ...AVATARS[i] } });
-  }
-  const accessoryMap: Record<string, string> = {};
-  for (let i = 0; i < ACCESSORIES.length; i++) {
-    const [a] = await Accessory.findOrCreate({ where: { organizationId, key: ACCESSORIES[i].key }, defaults: { organizationId, orderIndex: i, ...ACCESSORIES[i] } });
-    accessoryMap[ACCESSORIES[i].key] = (a as any).id;
-  }
-
-  // Reward shop — spend earned coins/stars on kart gear and real-world perks.
-  const shopDefs: any[] = [
-    { kind: 'ACCESSORY', name: 'Neon Wings', description: 'Glowing wings for your kart', priceCoins: 150, priceStars: 0, targetId: accessoryMap['neon_wings'] },
-    { kind: 'ACCESSORY', name: 'Victory Trail', description: 'Leave a sparkling trail behind you', priceCoins: 250, priceStars: 3, targetId: accessoryMap['victory_trail'] },
-    { kind: 'COUPON', name: 'Coffee Voucher', description: 'A free coffee at the office café', priceCoins: 100, priceStars: 0 },
-    { kind: 'COMPANY_REWARD', name: 'Half-Day Off', description: 'Redeem a half day of leave (admin approval)', priceCoins: 500, priceStars: 10, stock: 5 },
-    { kind: 'TITLE', name: 'Legend Title', description: 'Show the "Legend" title on leaderboards', priceCoins: 300, priceStars: 5 },
-  ];
-  for (const s of shopDefs) {
-    if (s.kind === 'ACCESSORY' && !s.targetId) continue;
-    await ShopItem.findOrCreate({ where: { organizationId, name: s.name }, defaults: { organizationId, isActive: true, ...s } });
-  }
-
-  // Ranks, each containing its levels with XP bands [minXp, maxXp).
-  for (const r of RANK_DEFS) {
-    const [rankRow] = await Rank.findOrCreate({
-      where: { organizationId, tier: r.tier },
-      defaults: { organizationId, name: r.name, tier: r.tier, minXp: r.minXp, color: r.color },
-    });
-    for (const lv of r.levels) {
-      const [lvlRow, createdLvl] = await Level.findOrCreate({
-        where: { organizationId, level: lv.level },
-        defaults: { organizationId, rankId: (rankRow as any).id, level: lv.level, minXp: lv.minXp, maxXp: lv.maxXp, title: lv.title },
-      });
-      if (!createdLvl) {
-        await lvlRow.update({ rankId: (rankRow as any).id, minXp: lv.minXp, maxXp: lv.maxXp, title: lv.title });
-      }
-    }
-  }
-
-  // Badges (auto-grant criteria)
-  const badgeMap: Record<string, string> = {};
-  for (const b of BADGES) {
-    const [row] = await Badge.findOrCreate({ where: { organizationId, code: b.code }, defaults: { organizationId, isAutoGranted: true, ...b } });
-    badgeMap[b.code] = (row as any).id;
-  }
-
-  // Leaderboards (XP + STARS, org-wide, all-time)
-  await Leaderboard.findOrCreate({ where: { organizationId, name: 'Org XP Leaders' }, defaults: { organizationId, name: 'Org XP Leaders', scope: 'ORGANIZATION', period: 'ALL_TIME', metric: 'XP' } });
-  await Leaderboard.findOrCreate({ where: { organizationId, name: 'Org Star Leaders' }, defaults: { organizationId, name: 'Org Star Leaders', scope: 'ORGANIZATION', period: 'ALL_TIME', metric: 'STARS' } });
-
-  // Certificate template
-  const [certTpl] = await CertificateTemplate.findOrCreate({
-    where: { organizationId, name: 'SDLC  Champion' },
-    defaults: {
-      organizationId,
-      name: 'SDLC  Champion',
-      layout: { title: 'SDLC  Champion', fields: ['recipient', 'issuedAt', 'stars'], accent: '#22D3EE' },
-    },
-  });
-
-  // Starred weekly tournament — a real, time-boxed competition with its own
-  // race configuration (question pool draw, timer, lanes) and placement prizes.
-  await Tournament.findOrCreate({
-    where: { organizationId, name: 'Weekly Learning Challenge' },
-    defaults: {
-      organizationId,
-      name: 'Weekly Learning Challenge',
-      description: 'Race the tournament track and earn the most XP this week!',
-      type: 'WEEKLY_CHALLENGE',
-      status: 'ACTIVE',
-      metric: 'XP',
-      startsAt: new Date(),
-      endsAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000),
-      starReward: 10,
-      maxStars: 30,
-      rewardConfig: { '1': { xp: 500, coins: 200 }, '2': { xp: 300 }, '3': { xp: 150 } },
-      gameConfig: DEFAULT_TOURNAMENT_GAME_CONFIG,
-    },
-  });
-
-  // Tournament question bank (categorized + difficulty-tiered).
+  // Avatars, accessories, shop, ranks/levels, badges, leaderboards, certificate
+  // template, weekly tournament + its question bank — via the same per-feature
+  // seeders the admin console's "Add Default Data" buttons use.
+  await ensureDefaultAvatars(organizationId);
+  await ensureDefaultAccessories(organizationId);
+  await ensureDefaultShopItems(organizationId);
+  await ensureDefaultRanks(organizationId);
+  await ensureDefaultBadges(organizationId);
+  await ensureDefaultLeaderboards(organizationId);
+  await ensureDefaultCertificateTemplate(organizationId);
+  await ensureDefaultTournament(organizationId);
   await ensureTournamentQuestionBank(organizationId);
+
+  // Look up the rows the bundle below references.
+  const accessoryRows = await Accessory.findAll({ where: { organizationId } });
+  const accessoryMap: Record<string, string> = {};
+  for (const a of accessoryRows as any[]) accessoryMap[a.key] = a.id;
+  const goldBadge: any = await Badge.findOne({ where: { organizationId, code: 'GOLD_CHAMPION' } });
+  const badgeMap: Record<string, string> = goldBadge ? { GOLD_CHAMPION: goldBadge.id } : {};
+  const certTpl: any = await CertificateTemplate.findOne({ where: { organizationId, name: 'SDLC  Champion' } });
 
   // ── SDLC Quest bundle: three pillars, storyboards, lane questions ──
   const [bundle] = await MissionBundle.findOrCreate({

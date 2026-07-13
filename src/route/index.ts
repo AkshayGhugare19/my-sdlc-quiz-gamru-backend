@@ -12,6 +12,8 @@ import { asyncHandler, ok } from '../utils/responseHandler';
 import { crudRouter } from '../core/crud.factory';
 import { AppError } from '../utils/AppError';
 import { currentOrgId } from '../tenancy/context';
+import { can } from '../auth/permissions';
+import { seedFeatureDefaults, DEFAULTABLE_FEATURES } from '../engines/defaultContent.engine';
 
 import authRoutes from '../modules/auth/auth.routes';
 import playRoutes from '../modules/game/play.routes';
@@ -48,6 +50,7 @@ import {
   RewardRule,
   Avatar,
   Accessory,
+  MissionAccessoryReward,
   ShopItem,
   Leaderboard,
   Tournament,
@@ -210,8 +213,13 @@ api.use(
     // chosen missions to this bundle (and detach any removed) via Mission.missionBundleId.
     afterWrite: async (bundleRow: any, body: any) => {
       if (!Array.isArray(body?.missionIds)) return;
-      const keep = new Set(body.missionIds);
       const current = await Mission.findAll({ where: { missionBundleId: bundleRow.id } });
+      // Guard: an EMPTY selection on a bundle that already has missions is almost
+      // always a form that submitted before its current selection finished
+      // loading — never silently dismantle a working bundle. To intentionally
+      // empty a bundle, detach its missions one by one in the bundle builder.
+      if (body.missionIds.length === 0 && current.length > 0) return;
+      const keep = new Set(body.missionIds);
       for (const m of current as any[]) if (!keep.has(m.id)) await m.update({ missionBundleId: null });
       let i = 0;
       for (const mid of body.missionIds) {
@@ -383,12 +391,102 @@ api.use(
     },
   }),
 );
-api.use('/badges', crudRouter(Badge, { searchable: ['name', 'code'], beforeWrite: withCode }));
+// The badge form sends its auto-grant rule as flat fields (criteriaType +
+// minTimeRemaining); fold them into the `criteria` JSONB the badge engine
+// evaluates after every race — so an admin-created badge auto-awards exactly
+// like a seeded one instead of silently never triggering.
+const composeBadgeCriteria = (data: any) => {
+  const { criteriaType, minTimeRemaining, ...rest } = withCode(data);
+  if (criteriaType !== undefined) {
+    if (!criteriaType) {
+      rest.criteria = null;
+    } else {
+      const criteria: any = { type: criteriaType };
+      if (criteriaType === 'FAST_LEARNER' && minTimeRemaining != null && minTimeRemaining !== '') {
+        criteria.minTimeRemaining = Number(minTimeRemaining);
+      }
+      rest.criteria = criteria;
+    }
+  }
+  return rest;
+};
+api.use('/badges', crudRouter(Badge, { searchable: ['name', 'code'], beforeWrite: composeBadgeCriteria }));
 api.use('/achievements', crudRouter(Achievement, { searchable: ['name', 'code'], beforeWrite: withCode }));
 api.use('/reward-rules', crudRouter(RewardRule, { filterable: ['refType', 'missionId', 'missionBundleId'] }));
 
 api.use('/avatars', crudRouter(Avatar, { order: [['order_index', 'ASC']], beforeWrite: withKey }));
-api.use('/accessories', crudRouter(Accessory, { filterable: ['slot'], order: [['order_index', 'ASC']], beforeWrite: withKey }));
+
+// ── Accessories — keep their unlock paths WIRED, the way the seeder does. ────
+// An accessory is only obtainable through a MissionAccessoryReward link (REWARD)
+// or an active ACCESSORY shop listing (SHOP). The admin form sends the unlock
+// wiring as flat fields; syncing it here means a UI-created accessory unlocks
+// exactly like a seeded one instead of staying locked forever.
+// The form's "Reward Mission" preselect reads the current link from here.
+api.get(
+  '/accessories/:id/reward-mission',
+  ...authed,
+  authorize('accessories', 'view'),
+  asyncHandler(async (req: any, res: any) => {
+    const link: any = await MissionAccessoryReward.findOne({ where: { accessoryId: req.params.id } });
+    return ok(res, link ? link.missionId : '');
+  }),
+);
+const stripAccessoryUnlockFields = (data: any) => {
+  const { rewardMissionId, rewardChancePct, ...rest } = withKey(data);
+  return rest; // unlock wiring is reconciled after save — not accessory columns
+};
+const syncAccessoryUnlocks = async (row: any, body: any) => {
+  if (!row) return;
+  // SHOP unlocks need a purchasable listing: create/update it from the price.
+  if (row.unlockType === 'SHOP') {
+    const price = Number(row.shopPriceCoins ?? 0) || 0;
+    const [listing, created] = await ShopItem.findOrCreate({
+      where: { organizationId: row.organizationId, kind: 'ACCESSORY', targetId: row.id },
+      defaults: {
+        organizationId: row.organizationId,
+        kind: 'ACCESSORY',
+        targetId: row.id,
+        name: row.name,
+        description: `Kart accessory — ${row.name}`,
+        priceCoins: price,
+        priceStars: 0,
+        isActive: true,
+      },
+    });
+    if (!created) await listing.update({ name: row.name, priceCoins: price, isActive: true });
+  }
+  // REWARD unlocks need a mission link: correct answers there can drop it.
+  // Only reconciled when the form actually sent a mission (a blank/failed
+  // preselect never touches existing links).
+  if (typeof body?.rewardMissionId === 'string' && body.rewardMissionId) {
+    const missionId = body.rewardMissionId;
+    const chance =
+      body.rewardChancePct != null && body.rewardChancePct !== ''
+        ? Math.min(100, Math.max(1, Number(body.rewardChancePct) || 100))
+        : 100;
+    // The form manages ONE reward mission per accessory — retarget any others.
+    await MissionAccessoryReward.destroy({ where: { accessoryId: row.id, missionId: { [Op.ne]: missionId } } });
+    const [link, created] = await MissionAccessoryReward.findOrCreate({
+      where: { accessoryId: row.id, missionId },
+      defaults: { accessoryId: row.id, missionId, trigger: 'CORRECT_ANSWER', chancePct: chance },
+    });
+    if (!created) await link.update({ trigger: 'CORRECT_ANSWER', chancePct: chance });
+  }
+};
+api.use(
+  '/accessories',
+  crudRouter(Accessory, {
+    filterable: ['slot'],
+    order: [['order_index', 'ASC']],
+    beforeWrite: stripAccessoryUnlockFields,
+    afterWrite: syncAccessoryUnlocks,
+    // Removing an accessory also removes its unlock wiring (never the missions).
+    beforeDelete: async (id: string) => {
+      await MissionAccessoryReward.destroy({ where: { accessoryId: id } });
+      await ShopItem.destroy({ where: { kind: 'ACCESSORY', targetId: id } });
+    },
+  }),
+);
 api.use('/shop-items', crudRouter(ShopItem, { filterable: ['kind', 'isActive'], searchable: ['name'], beforeWrite: (d: any) => (d.kind ? d : { ...d, kind: 'CUSTOM' }) }));
 
 api.use('/leaderboards', crudRouter(Leaderboard, { filterable: ['scope', 'period', 'metric'] }));
@@ -437,6 +535,30 @@ const composeTournamentGameConfig = (data: any) => {
   return rest;
 };
 api.use('/tournaments', crudRouter(Tournament, { filterable: ['status', 'type'], searchable: ['name'], beforeWrite: composeTournamentGameConfig }));
+
+// ── Per-feature default data ────────────────────────────────────────────────
+// "Add Default Data" in the admin console: seed ONE feature's example rows for
+// the acting organization. Idempotent — existing records are skipped, never
+// overwritten — and gated by the same create permission as the feature itself.
+api.post(
+  '/defaults/:feature',
+  ...authed,
+  asyncHandler(async (req: any, res: any) => {
+    const feature = String(req.params.feature);
+    if (!(DEFAULTABLE_FEATURES as readonly string[]).includes(feature)) {
+      throw AppError.badRequest(`No default data is available for "${feature}"`);
+    }
+    if (!can(req.user.role, feature, 'create')) {
+      throw AppError.forbidden(`Not permitted to create ${feature}`);
+    }
+    const organizationId = currentOrgId();
+    if (!organizationId) {
+      throw AppError.badRequest('Act as an organization first — defaults are seeded per organization.');
+    }
+    const result = await seedFeatureDefaults(organizationId, feature);
+    return ok(res, result, `${result.added} added, ${result.skipped} already existed (skipped)`);
+  }),
+);
 
 api.use('/campaigns', crudRouter(Campaign, { filterable: ['status', 'channel'], searchable: ['name'] }));
 api.use('/notifications', crudRouter(Notification, { filterable: ['status', 'userId'] }));
