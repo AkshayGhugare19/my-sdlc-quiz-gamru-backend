@@ -1,7 +1,16 @@
 // Central model registry + associations (gamru config/associations pattern).
 // Import this once at boot so every model is initialised and related.
 import { Organization, Department, User, RefreshToken } from './identity';
-import { Media, Course, ContentBlock, LearningPath, LearningPathItem } from './content';
+import {
+  Media,
+  Course,
+  ContentBlock,
+  LearningPath,
+  LearningPathItem,
+  CourseMission,
+  CourseBundle,
+  CourseTournament,
+} from './content';
 import { MissionBundle, Mission, Question, QuestionOption, MissionQuestion } from './missions';
 import { MissionAttempt, GameSession, AnswerEvent, Progress } from './gameplay';
 import {
@@ -64,6 +73,18 @@ LearningPath.hasMany(LearningPathItem, { foreignKey: 'learningPathId', as: 'item
 LearningPathItem.belongsTo(LearningPath, { foreignKey: 'learningPathId' });
 LearningPathItem.belongsTo(Course, { foreignKey: 'courseId' });
 LearningPathItem.belongsTo(MissionBundle, { foreignKey: 'missionBundleId' });
+
+// ── Course roadmap — a course REFERENCES reusable missions/bundles/tournaments
+// via join tables (LMS style). Content is never owned or duplicated: the same
+// mission/bundle/tournament can appear in any number of courses, and each keeps
+// its own independent progress records.
+Course.belongsToMany(Mission, { through: CourseMission, foreignKey: 'courseId', otherKey: 'missionId', as: 'roadmapMissions' });
+Mission.belongsToMany(Course, { through: CourseMission, foreignKey: 'missionId', otherKey: 'courseId', as: 'courses' });
+Course.belongsToMany(MissionBundle, { through: CourseBundle, foreignKey: 'courseId', otherKey: 'missionBundleId', as: 'roadmapBundles' });
+MissionBundle.belongsToMany(Course, { through: CourseBundle, foreignKey: 'missionBundleId', otherKey: 'courseId', as: 'courses' });
+Course.belongsToMany(Tournament, { through: CourseTournament, foreignKey: 'courseId', otherKey: 'tournamentId', as: 'roadmapTournaments' });
+Tournament.belongsToMany(Course, { through: CourseTournament, foreignKey: 'tournamentId', otherKey: 'courseId', as: 'courses' });
+Course.belongsTo(CertificateTemplate, { foreignKey: 'certificateTemplateId' });
 
 // ── Missions & questions ────────────────────────────────────────────────
 MissionBundle.hasMany(Mission, { foreignKey: 'missionBundleId', as: 'missions' });
@@ -168,6 +189,9 @@ export const models = {
   ContentBlock,
   LearningPath,
   LearningPathItem,
+  CourseMission,
+  CourseBundle,
+  CourseTournament,
   MissionBundle,
   Mission,
   Question,

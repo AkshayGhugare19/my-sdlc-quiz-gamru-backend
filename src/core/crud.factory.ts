@@ -13,6 +13,7 @@ import { Role } from '../middlewares/role.middleware';
 import { authorizeCrud } from '../middlewares/permission.middleware';
 import { asyncHandler, ok, created } from '../utils/responseHandler';
 import { AppError } from '../utils/AppError';
+import { isSuperContext } from '../tenancy/context';
 
 export interface CrudOptions {
   tenantScoped?: boolean;
@@ -57,6 +58,13 @@ export function crudRouter<M extends Model>(model: ModelStatic<M>, options: Crud
       }
       if (req.query.search && options.searchable?.length) {
         where[Op.or as any] = options.searchable.map((c) => ({ [c]: { [Op.iLike]: `%${req.query.search}%` } }));
+      }
+      // Cross-tenant browsing: a SUPER ADMIN (no tenant bound) sees every org's
+      // rows mixed together, so ?organizationId= lets them narrow to one org.
+      // Only honoured in super context — tenant users are hard-scoped to their
+      // own org by the repository and must never be able to aim this elsewhere.
+      if ((options.tenantScoped ?? true) && req.query.organizationId && isSuperContext()) {
+        where.organizationId = req.query.organizationId;
       }
       const result = await repo.paginate({
         page: Number(req.query.page ?? 1),

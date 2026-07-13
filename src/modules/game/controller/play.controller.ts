@@ -7,6 +7,9 @@ import {
   MissionBundle,
   Mission,
   Course,
+  CourseMission,
+  CourseBundle,
+  CourseTournament,
   ContentBlock,
   Progress,
   GameSession,
@@ -19,6 +22,7 @@ import {
   Department,
   Tournament,
   TournamentEntry,
+  IssuedCertificate,
   ShopItem,
   ShopOrder,
 } from '../../../models';
@@ -26,6 +30,8 @@ import { unlockAccessory } from '../../../engines/reward.engine';
 import { ensureDefaultGameContent } from '../../../engines/defaultContent.engine';
 import { startSession, getSessionState, submitAnswer, completeSession } from '../service/gameSession.service';
 import { settleDueTournaments } from '../service/tournament.service';
+import { recomputeCourseProgress } from '../../../engines/progress.engine';
+import { issueCertificate } from '../../../engines/certificate.engine';
 import { resolveRank } from '../../../engines/xp.engine';
 import { normalizeRole } from '../../../auth/permissions';
 import { MissionAccessoryReward } from '../../../models';
@@ -95,6 +101,155 @@ export async function listPillars(req: Request, res: Response) {
         progress: pMap.get(`BUNDLE_MISSION:${m.id}`) ?? null,
       })),
   }));
+  return ok(res, data);
+}
+
+// GET /api/play/courses — the player's learning roadmaps (LMS style). Each
+// published course lists the missions, mission bundles and tournaments it
+// REFERENCES, each with the player's OWN progress on that entity (standalone
+// mission progress, bundle progress, tournament entry) plus the course-level
+// rollup. Completing everything issues the course certificate (once).
+export async function listCourses(req: Request, res: Response) {
+  const userId = req.user!.id;
+  const organizationId = req.user!.organizationId!;
+
+  const courses = await Course.findAll({
+    where: { organizationId, isPublished: true },
+    order: [['order_index', 'ASC'], ['created_at', 'ASC']],
+  });
+
+  const progressRows = await Progress.findAll({ where: { userId } });
+  const pMap = new Map(progressRows.map((p: any) => [`${p.entityType}:${p.entityId}`, p]));
+  const myEntries = await TournamentEntry.findAll({ where: { userId } });
+  const entryMap = new Map((myEntries as any[]).map((e) => [e.tournamentId, e]));
+
+  const data: any[] = [];
+  for (const c of courses as any[]) {
+    const [missionLinks, bundleLinks, tournamentLinks] = await Promise.all([
+      CourseMission.findAll({ where: { courseId: c.id }, order: [['order_index', 'ASC']] }),
+      CourseBundle.findAll({ where: { courseId: c.id }, order: [['order_index', 'ASC']] }),
+      CourseTournament.findAll({ where: { courseId: c.id }, order: [['order_index', 'ASC']] }),
+    ]);
+    const missionIds = (missionLinks as any[]).map((l) => l.missionId);
+    const bundleIds = (bundleLinks as any[]).map((l) => l.missionBundleId);
+    const tournamentIds = (tournamentLinks as any[]).map((l) => l.tournamentId);
+    // A course with no roadmap content is skipped for players (nothing to do).
+    if (!missionIds.length && !bundleIds.length && !tournamentIds.length) continue;
+
+    const [missions, bundles, tournaments, bundleMissions] = await Promise.all([
+      missionIds.length ? Mission.findAll({ where: { id: missionIds, isPublished: true } }) : [],
+      bundleIds.length ? MissionBundle.findAll({ where: { id: bundleIds, isPublished: true } }) : [],
+      tournamentIds.length ? Tournament.findAll({ where: { id: tournamentIds } }) : [],
+      bundleIds.length ? Mission.findAll({ where: { missionBundleId: bundleIds, isPublished: true }, order: [['order_index', 'ASC']] }) : [],
+    ]);
+    const missionById = new Map((missions as any[]).map((m) => [m.id, m]));
+    const bundleById = new Map((bundles as any[]).map((b) => [b.id, b]));
+    const tournamentById = new Map((tournaments as any[]).map((t) => [t.id, t]));
+    const missionsByBundle = new Map<string, any[]>();
+    for (const m of bundleMissions as any[]) {
+      const list = missionsByBundle.get(m.missionBundleId) ?? [];
+      list.push(m);
+      missionsByBundle.set(m.missionBundleId, list);
+    }
+
+    // Roll up (and persist) the course progress, then issue the certificate on
+    // first completion — issueCertificate dedupes per (user, source).
+    const rollup = await recomputeCourseProgress(userId, organizationId, c.id);
+    let certificate: any = await IssuedCertificate.findOne({
+      where: { userId, sourceType: 'COURSE', sourceId: c.id },
+    });
+    if (!certificate && rollup.completed && c.certificateTemplateId) {
+      certificate = await issueCertificate({
+        userId,
+        organizationId,
+        templateId: c.certificateTemplateId,
+        sourceType: 'COURSE',
+        sourceId: c.id,
+        data: { title: c.title, completionPct: rollup.completionPct },
+      });
+    }
+
+    data.push({
+      id: c.id,
+      title: c.title,
+      slug: c.slug,
+      summary: c.summary,
+      description: c.description,
+      coverUrl: c.coverUrl,
+      color: c.color,
+      difficulty: c.difficulty,
+      estimatedMin: c.estimatedMin,
+      completionPct: rollup.completionPct,
+      completed: rollup.completed,
+      hasCertificateTemplate: !!c.certificateTemplateId,
+      certificateSerial: certificate ? (certificate as any).serial : null,
+      // Standalone mission items — played with STANDALONE progress (MISSION).
+      missions: missionIds
+        .map((id) => missionById.get(id))
+        .filter(Boolean)
+        .map((m: any) => {
+          const p: any = pMap.get(`MISSION:${m.id}`);
+          return {
+            id: m.id,
+            title: m.title,
+            difficulty: m.difficulty,
+            estimatedMin: m.estimatedMin,
+            maxStars: m.maxStars,
+            status: p?.status ?? 'AVAILABLE',
+            completionPct: p?.completionPct ?? 0,
+            starsEarned: p?.starsEarned ?? 0,
+          };
+        }),
+      // Bundle items — played FROM the bundle (BUNDLE_MISSION flow), rolled up
+      // to MISSION_BUNDLE progress. Fully separate from the standalone rows.
+      bundles: bundleIds
+        .map((id) => bundleById.get(id))
+        .filter(Boolean)
+        .map((b: any) => {
+          const p: any = pMap.get(`MISSION_BUNDLE:${b.id}`);
+          return {
+            id: b.id,
+            title: b.title,
+            maxStars: b.maxStars,
+            status: p?.status ?? 'AVAILABLE',
+            completionPct: p?.completionPct ?? 0,
+            starsEarned: p?.starsEarned ?? 0,
+            missions: (missionsByBundle.get(b.id) ?? []).map((m: any) => {
+              const mp: any = pMap.get(`BUNDLE_MISSION:${m.id}`);
+              return {
+                id: m.id,
+                title: m.title,
+                maxStars: m.maxStars,
+                bundleId: b.id,
+                status: mp?.status ?? 'AVAILABLE',
+                starsEarned: mp?.starsEarned ?? 0,
+              };
+            }),
+          };
+        }),
+      tournaments: tournamentIds
+        .map((id) => tournamentById.get(id))
+        .filter(Boolean)
+        .map((t: any) => {
+          const entry: any = entryMap.get(t.id);
+          return {
+            id: t.id,
+            name: t.name,
+            type: t.type,
+            status: t.status,
+            metric: t.metric,
+            startsAt: t.startsAt,
+            endsAt: t.endsAt,
+            prizes: t.rewardConfig ?? null,
+            joined: !!entry,
+            myScore: entry?.score ?? null,
+            myStars: entry?.starsEarned ?? null,
+            myPlacement: entry?.placement ?? null,
+          };
+        }),
+    });
+  }
+
   return ok(res, data);
 }
 

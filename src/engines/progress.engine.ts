@@ -1,6 +1,16 @@
 // Progress engine — maintains per-user Progress rows for missions, bundles,
 // courses and learning paths (drives the hub "ticks & locks" in the game).
-import { Progress, Mission, MissionBundle } from '../models';
+import {
+  Progress,
+  Mission,
+  MissionBundle,
+  Course,
+  CourseMission,
+  CourseBundle,
+  CourseTournament,
+  Tournament,
+  TournamentEntry,
+} from '../models';
 
 export async function markProgress(params: {
   userId: string;
@@ -68,4 +78,79 @@ export async function recomputeBundleProgress(userId: string, organizationId: st
   });
 
   return { completed: isComplete, stars, maxStars: bundle.maxStars, completionPct };
+}
+
+/**
+ * Recompute a COURSE'S roadmap completion from its referenced content's OWN
+ * progress records — the LMS rollup. A course never owns progress of its own:
+ *  - a mission item is done when its STANDALONE progress (MISSION) is COMPLETED,
+ *  - a bundle item is done when the bundle (MISSION_BUNDLE) is COMPLETED,
+ *  - a tournament item is done when the player has an entry and has scored
+ *    (or the tournament has been settled).
+ * Those records stay fully independent — this only READS them and writes the
+ * separate COURSE row, so nothing ever overwrites anything else.
+ * Returns per-item detail so player/admin UIs can show the roadmap.
+ */
+export async function recomputeCourseProgress(userId: string, organizationId: string, courseId: string) {
+  const course: any = await Course.findByPk(courseId);
+  if (!course) return { completed: false, completionPct: 0, items: [] as any[] };
+
+  const [missionLinks, bundleLinks, tournamentLinks] = await Promise.all([
+    CourseMission.findAll({ where: { courseId }, order: [['order_index', 'ASC']] }),
+    CourseBundle.findAll({ where: { courseId }, order: [['order_index', 'ASC']] }),
+    CourseTournament.findAll({ where: { courseId }, order: [['order_index', 'ASC']] }),
+  ]);
+
+  const missionIds = (missionLinks as any[]).map((l) => l.missionId);
+  const bundleIds = (bundleLinks as any[]).map((l) => l.missionBundleId);
+  const tournamentIds = (tournamentLinks as any[]).map((l) => l.tournamentId);
+
+  const [missionProgress, bundleProgress, entries, tournaments] = await Promise.all([
+    missionIds.length ? Progress.findAll({ where: { userId, entityType: 'MISSION', entityId: missionIds } }) : [],
+    bundleIds.length ? Progress.findAll({ where: { userId, entityType: 'MISSION_BUNDLE', entityId: bundleIds } }) : [],
+    tournamentIds.length ? TournamentEntry.findAll({ where: { userId, tournamentId: tournamentIds } }) : [],
+    tournamentIds.length ? Tournament.findAll({ where: { id: tournamentIds } }) : [],
+  ]);
+  const mMap = new Map((missionProgress as any[]).map((p) => [p.entityId, p]));
+  const bMap = new Map((bundleProgress as any[]).map((p) => [p.entityId, p]));
+  const eMap = new Map((entries as any[]).map((e) => [e.tournamentId, e]));
+  const tMap = new Map((tournaments as any[]).map((t) => [t.id, t]));
+
+  const items = [
+    ...missionIds.map((id) => {
+      const p: any = mMap.get(id);
+      return { kind: 'MISSION' as const, id, done: p?.status === 'COMPLETED', pct: p?.completionPct ?? 0 };
+    }),
+    ...bundleIds.map((id) => {
+      const p: any = bMap.get(id);
+      return { kind: 'MISSION_BUNDLE' as const, id, done: p?.status === 'COMPLETED', pct: p?.completionPct ?? 0 };
+    }),
+    ...tournamentIds.map((id) => {
+      const entry: any = eMap.get(id);
+      const t: any = tMap.get(id);
+      const done = !!entry && ((entry.score ?? 0) > 0 || t?.status === 'COMPLETED');
+      return { kind: 'TOURNAMENT' as const, id, done, pct: done ? 100 : entry ? 50 : 0 };
+    }),
+  ];
+
+  if (items.length === 0) return { completed: false, completionPct: 0, items };
+
+  const doneCount = items.filter((i) => i.done).length;
+  const completionPct = Math.round((doneCount / items.length) * 100);
+  const isComplete = doneCount === items.length;
+
+  // Only persist once the player has actually completed something — merely
+  // viewing the course list must not create noise Progress rows.
+  if (doneCount > 0) {
+    await markProgress({
+      userId,
+      organizationId,
+      entityType: 'COURSE',
+      entityId: courseId,
+      status: isComplete ? 'COMPLETED' : 'IN_PROGRESS',
+      completionPct,
+    });
+  }
+
+  return { completed: isComplete, completionPct, items };
 }

@@ -3,11 +3,12 @@
 // standard admin management resources (gamru factory-router pattern).
 import { Router } from 'express';
 import multer from 'multer';
+import { fn, col, Op } from 'sequelize';
 
 import { authenticate } from '../middlewares/auth.middleware';
 import { bindTenant } from '../middlewares/tenant.middleware';
 import { authorize } from '../middlewares/permission.middleware';
-import { asyncHandler } from '../utils/responseHandler';
+import { asyncHandler, ok } from '../utils/responseHandler';
 import { crudRouter } from '../core/crud.factory';
 import { AppError } from '../utils/AppError';
 import { currentOrgId } from '../tenancy/context';
@@ -17,6 +18,7 @@ import playRoutes from '../modules/game/play.routes';
 import * as analytics from '../modules/analytics/analytics.controller';
 import * as media from '../modules/media/media.controller';
 import * as mission from '../modules/mission/mission.controller';
+import * as course from '../modules/course/course.controller';
 import * as bundle from '../modules/missionBundle/missionBundle.controller';
 import * as rank from '../modules/rank/rank.controller';
 import * as adminProgress from '../modules/progress/adminProgress.controller';
@@ -29,10 +31,14 @@ import {
   Department,
   User,
   Course,
+  CourseMission,
+  CourseBundle,
+  CourseTournament,
   ContentBlock,
   LearningPath,
   MissionBundle,
   Mission,
+  MissionQuestion,
   Question,
   QuestionOption,
   Level,
@@ -137,7 +143,59 @@ api.use(
   }),
 );
 
-api.use('/courses', crudRouter(Course, { filterable: ['category', 'isPublished'], searchable: ['title', 'slug'], order: [['order_index', 'ASC']], beforeWrite: withSlug }));
+// ── Course roadmap builder — a course SELECTS existing missions, bundles and
+// tournaments (LMS style). These read endpoints power the form's preselects.
+api.get('/courses/:id/missions', ...authed, authorize('courses', 'view'), asyncHandler(course.listMissions));
+api.get('/courses/:id/bundles', ...authed, authorize('courses', 'view'), asyncHandler(course.listBundles));
+api.get('/courses/:id/tournaments', ...authed, authorize('courses', 'view'), asyncHandler(course.listTournaments));
+
+// Reconcile one course↔content join table from an array of ids sent by the
+// course form (missionIds / missionBundleIds / tournamentIds). Only runs when
+// the form actually sends that array — content is referenced, never owned, so
+// removing a reference never deletes the mission/bundle/tournament itself.
+const reconcileCourseLinks = async (
+  model: any,
+  courseId: string,
+  fk: string,
+  ids: unknown,
+) => {
+  if (!Array.isArray(ids)) return;
+  const wanted = ids.map(String);
+  const keep = new Set(wanted);
+  const existing: any[] = await model.findAll({ where: { courseId } });
+  for (const link of existing) if (!keep.has(String(link[fk]))) await link.destroy();
+  let i = 0;
+  for (const targetId of wanted) {
+    const [link]: any = await model.findOrCreate({
+      where: { courseId, [fk]: targetId },
+      defaults: { courseId, [fk]: targetId, orderIndex: i },
+    });
+    await link.update({ orderIndex: i });
+    i++;
+  }
+};
+const reconcileCourseContent = async (courseRow: any, body: any) => {
+  if (!courseRow) return;
+  await reconcileCourseLinks(CourseMission, courseRow.id, 'missionId', body?.missionIds);
+  await reconcileCourseLinks(CourseBundle, courseRow.id, 'missionBundleId', body?.missionBundleIds);
+  await reconcileCourseLinks(CourseTournament, courseRow.id, 'tournamentId', body?.tournamentIds);
+};
+api.use(
+  '/courses',
+  crudRouter(Course, {
+    filterable: ['category', 'isPublished', 'difficulty'],
+    searchable: ['title', 'slug'],
+    order: [['order_index', 'ASC']],
+    beforeWrite: withSlug,
+    afterWrite: reconcileCourseContent,
+    // Deleting a course removes only its references — never the content.
+    beforeDelete: async (id: string) => {
+      await CourseMission.destroy({ where: { courseId: id } });
+      await CourseBundle.destroy({ where: { courseId: id } });
+      await CourseTournament.destroy({ where: { courseId: id } });
+    },
+  }),
+);
 api.use('/content-blocks', crudRouter(ContentBlock, { tenantScoped: false, filterable: ['courseId'], order: [['order_index', 'ASC']] }));
 api.use('/learning-paths', crudRouter(LearningPath, { searchable: ['title'], beforeWrite: withSlug }));
 
@@ -163,11 +221,56 @@ api.use(
     },
   }),
 );
-api.use('/missions', crudRouter(Mission, { filterable: ['missionBundleId', 'isPublished', 'difficulty'], searchable: ['title', 'slug'], order: [['order_index', 'ASC']], beforeWrite: withSlug }));
+// A mission draws its questions from ONE question category (e.g. "Environment").
+// When the mission form sends `questionCategory`, every ACTIVE question in that
+// category is attached via the MissionQuestion join — the SAME rows the seeder
+// writes (each seeded pillar links its whole category), so a UI-built mission
+// becomes playable exactly like a seeded one instead of coming up "no questions
+// yet". Advanced users can still fine-tune pins/order in the Mission Builder.
+// (`questionIds` is still honoured if a caller sends an explicit list instead.)
+const reconcileMissionQuestions = async (missionRow: any, body: any) => {
+  if (!missionRow) return;
+
+  const category = typeof body?.questionCategory === 'string' ? body.questionCategory.trim() : '';
+  let targetIds: string[] | null = null;
+  if (category) {
+    const qs: any[] = await Question.findAll({
+      where: { organizationId: missionRow.organizationId, category, isActive: true },
+      attributes: ['id'],
+    });
+    targetIds = qs.map((q) => String(q.id));
+  } else if (Array.isArray(body?.questionIds)) {
+    targetIds = body.questionIds.map(String);
+  }
+  // Neither a category nor an explicit list was sent → this write isn't managing
+  // the question pool (e.g. a status-only edit); leave the existing links alone.
+  if (targetIds === null) return;
+
+  const existing: any[] = await MissionQuestion.findAll({ where: { missionId: missionRow.id } });
+  // Guard: resolving to an empty set on a mission that already HAS questions is
+  // almost always the edit form submitting before its category finished loading,
+  // or a category that has no questions yet. Never silently wipe a working pool
+  // and bring back "no questions yet" — detach explicitly in the Mission Builder.
+  if (targetIds.length === 0 && existing.length > 0) return;
+
+  const keep = new Set(targetIds);
+  for (const link of existing) if (!keep.has(String(link.questionId))) await link.destroy();
+  let i = 0;
+  for (const questionId of targetIds) {
+    const [link]: any = await MissionQuestion.findOrCreate({
+      where: { missionId: missionRow.id, questionId },
+      // First question is pinned (always shown) — mirrors the seeder's convention.
+      defaults: { missionId: missionRow.id, questionId, orderIndex: i, isPinned: i === 0 },
+    });
+    await link.update({ orderIndex: i });
+    i++;
+  }
+};
+api.use('/missions', crudRouter(Mission, { filterable: ['missionBundleId', 'isPublished', 'difficulty'], searchable: ['title', 'slug'], order: [['order_index', 'ASC']], beforeWrite: withSlug, afterWrite: reconcileMissionQuestions }));
 // Questions carry their answer options inline (body.options: [{ id?, label,
 // isCorrect }]) — the racing lanes. Validated up front, reconciled after save.
 const SINGLE_ANSWER_TYPES = ['SINGLE_CHOICE', 'TRUE_FALSE', 'IMAGE_CHOICE', 'TIMED_QUESTION', 'VIDEO_QUESTION'];
-const validateQuestionOptions = (data: any) => {
+const validateQuestionOptions = (data: any, req: any) => {
   if (data.options !== undefined && !Array.isArray(data.options)) throw AppError.badRequest('options must be an array');
   if (Array.isArray(data.options)) {
     const opts = data.options.filter((o: any) => String(o.label ?? '').trim() !== '');
@@ -179,6 +282,9 @@ const validateQuestionOptions = (data: any) => {
     }
   }
   const { options, ...rest } = data; // Question itself has no `options` column
+  // Stamp the author on create so the bank shows who added each question
+  // (updates keep the original author).
+  if (req?.method === 'POST' && !rest.createdById && req?.user?.id) rest.createdById = req.user.id;
   return rest;
 };
 const reconcileQuestionOptions = async (row: any, body: any) => {
@@ -195,6 +301,29 @@ const reconcileQuestionOptions = async (row: any, body: any) => {
     else await QuestionOption.create({ ...attrs, questionId: row.id } as any);
   }
 };
+// Distinct question categories for the active org (+counts). Powers the
+// "Question Category" picker on the mission form and the tournament pool config,
+// so admins choose from real categories instead of guessing free text. MUST be
+// registered before the `/questions` crud mount (else `categories` looks like an id).
+api.get(
+  '/questions/categories',
+  ...authed,
+  authorize('questions', 'view'),
+  asyncHandler(async (_req: any, res: any) => {
+    const organizationId = currentOrgId();
+    if (!organizationId) return ok(res, []);
+    const rows: any[] = await Question.findAll({
+      where: { organizationId, isActive: true, category: { [Op.and]: [{ [Op.ne]: null }, { [Op.ne]: '' }] } } as any,
+      attributes: ['category', [fn('COUNT', col('id')), 'count']],
+      group: ['category'],
+      order: [['category', 'ASC']],
+    });
+    const data = rows
+      .map((r) => ({ category: String(r.category), count: Number(r.get('count')) }))
+      .filter((r) => r.category.trim() !== '');
+    return ok(res, data);
+  }),
+);
 api.use(
   '/questions',
   crudRouter(Question, {

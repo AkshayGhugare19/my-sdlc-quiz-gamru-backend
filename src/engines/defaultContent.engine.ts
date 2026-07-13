@@ -19,6 +19,9 @@ import {
   CertificateTemplate,
   Tournament,
   Course,
+  CourseMission,
+  CourseBundle,
+  CourseTournament,
   ContentBlock,
   MissionBundle,
   Mission,
@@ -219,6 +222,60 @@ export async function ensureTournamentQuestionBank(organizationId: string) {
 }
 
 /**
+ * Make sure the org has the demo "SDLC Quest Roadmap" COURSE — the LMS-style
+ * learning roadmap that REFERENCES the seeded pillar bundle, its missions and
+ * the weekly tournament (courses select existing content; they never own it).
+ * Idempotent by natural keys, and kept standalone so re-seeding an org that was
+ * provisioned before course roadmaps existed still backfills it.
+ */
+export async function ensureRoadmapCourse(organizationId: string) {
+  const bundle: any = await MissionBundle.findOne({ where: { organizationId, slug: 'SDLC-quest' } });
+  const missions: any[] = await Mission.findAll({
+    where: { organizationId, slug: PILLARS.map((p) => p.slug) },
+    order: [['order_index', 'ASC']],
+  });
+  const tournament: any = await Tournament.findOne({ where: { organizationId, name: 'Weekly Learning Challenge' } });
+  const certTpl: any = await CertificateTemplate.findOne({ where: { organizationId, name: 'SDLC  Champion' } });
+  if (!bundle && missions.length === 0 && !tournament) return; // org has no seeded content to reference
+
+  const [courseRow] = await Course.findOrCreate({
+    where: { organizationId, slug: 'sdlc-quest-roadmap' },
+    defaults: {
+      organizationId,
+      title: 'SDLC Quest Roadmap',
+      slug: 'sdlc-quest-roadmap',
+      summary: 'The complete SDLC Quest journey: race every pillar mission, finish the quest bundle and compete in the weekly tournament.',
+      category: 'SDLC',
+      difficulty: 'MEDIUM',
+      estimatedMin: 45,
+      certificateTemplateId: certTpl ? certTpl.id : null,
+      isPublished: true,
+      orderIndex: 0,
+    },
+  });
+  const courseId = (courseRow as any).id;
+
+  for (let i = 0; i < missions.length; i++) {
+    await CourseMission.findOrCreate({
+      where: { courseId, missionId: missions[i].id },
+      defaults: { courseId, missionId: missions[i].id, orderIndex: i },
+    });
+  }
+  if (bundle) {
+    await CourseBundle.findOrCreate({
+      where: { courseId, missionBundleId: bundle.id },
+      defaults: { courseId, missionBundleId: bundle.id, orderIndex: 0 },
+    });
+  }
+  if (tournament) {
+    await CourseTournament.findOrCreate({
+      where: { courseId, tournamentId: tournament.id },
+      defaults: { courseId, tournamentId: tournament.id, orderIndex: 0 },
+    });
+  }
+}
+
+/**
  * Provision the full default game content for an organization. Idempotent —
  * safe to call on every signup / hub load; returns false immediately when the
  * org already has a published bundle.
@@ -405,6 +462,9 @@ export async function ensureDefaultGameContent(organizationId: string): Promise<
       });
     }
   }
+
+  // The LMS-style demo roadmap course that references the content created above.
+  await ensureRoadmapCourse(organizationId);
 
   return true;
 }

@@ -7,7 +7,7 @@
 import { sequelize } from '../config/db';
 import '../models';
 import { Organization, Department, User } from '../models';
-import { ensureDefaultGameContent, ensureTournamentQuestionBank } from '../engines/defaultContent.engine';
+import { ensureDefaultGameContent, ensureTournamentQuestionBank, ensureRoadmapCourse } from '../engines/defaultContent.engine';
 import { hashPassword } from '../utils/password';
 
 async function seedTenant(opts: { name: string; slug: string }) {
@@ -50,6 +50,9 @@ async function seedTenant(opts: { name: string; slug: string }) {
   // Runs standalone too, so orgs seeded before tournament pools existed still
   // get the categorized tournament question bank on re-seed.
   await ensureTournamentQuestionBank(organizationId);
+  // Likewise standalone: orgs seeded before course roadmaps existed still get
+  // the demo "SDLC Quest Roadmap" course on re-seed.
+  await ensureRoadmapCourse(organizationId);
   console.log(created ? '  ✓ SDLC Quest content provisioned' : '  ✓ SDLC Quest content already present');
 }
 
@@ -65,12 +68,22 @@ async function run() {
     defaults: { email: 'superadmin@platform.com', passwordHash: pwd, role: 'SUPER_ADMIN', status: 'ACTIVE', displayName: 'Platform Super Admin' },
   });
 
+  // ONE demo tenant by default. Every tenant gets the same full content set, so
+  // seeding several makes a super admin (who sees across orgs) read everything
+  // "twice" — that's per-tenant copies, not duplicate rows. Set
+  // SEED_SECOND_TENANT=true only when you explicitly want a second demo org to
+  // test multi-tenancy.
   await seedTenant({ name: 'Acme Corporation', slug: 'acme' });
-  await seedTenant({ name: 'Globex Industries', slug: 'globex' });
+  if (process.env.SEED_SECOND_TENANT === 'true') {
+    await seedTenant({ name: 'Globex Industries', slug: 'globex' });
+  }
 
   console.log('\n✅ Seed complete.');
   console.log('   Super Admin: superadmin@platform.com / Password123!');
   console.log('   Acme admin:  admin@acme.com / Password123!');
+  if (process.env.SEED_SECOND_TENANT === 'true') {
+    console.log('   Globex admin: admin@globex.com / Password123!');
+  }
   await sequelize.close();
 }
 

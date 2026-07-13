@@ -275,7 +275,10 @@ export async function startSession(params: {
     } else {
       ordered = pool;
     }
-    ordered = ordered.slice(0, mission.questionCount);
+    // A misconfigured questionCount of 0 (or less) must never silently produce an
+    // empty race for a mission that DOES have questions — fall back to the whole pool.
+    const cap = mission.questionCount > 0 ? mission.questionCount : ordered.length;
+    ordered = ordered.slice(0, cap);
     if (ordered.length === 0) {
       throw AppError.badRequest(
         `"${mission.title}" has no questions yet — an admin needs to attach questions to this mission before it can be played.`,

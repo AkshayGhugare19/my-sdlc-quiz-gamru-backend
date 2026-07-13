@@ -36,6 +36,7 @@ const answerSchema = Joi.object({
 
 router.get('/avatars', asyncHandler(play.listAvatars));
 router.get('/pillars', asyncHandler(play.listPillars));
+router.get('/courses', asyncHandler(play.listCourses));
 router.get('/me', asyncHandler(play.getProfile));
 router.get('/dashboard', asyncHandler(play.getDashboard));
 router.get('/garage', asyncHandler(play.getGarage));
