@@ -514,19 +514,38 @@ export async function completeSession(sessionId: string) {
 
   // ── Tournament-only race: XP for effort + tournament standings. No mission
   // progress, wallet stars or coins — tournament prizes are paid at settlement.
-  // ── Quick race (no mission, no tournament): pure practice — the run is
-  // scored for the result screen but earns nothing and records no progress.
+  // ── Quick race (no mission, no tournament): scored like a real run — XP
+  // (levels recompute inside awardXp), stars and coins are credited to the
+  // wallet — but no mission/bundle progress is ever recorded.
   if (!mission) {
     const quickRace = !session.tournamentId;
     const total = session.questionOrder.length;
     const scorePct = total ? Math.round((session.correctCount / total) * 100) : 0;
     const passed = scorePct >= rules.passingScorePct;
     const xpBase = (rules.xpPerQuestion ?? 20) * total;
-    const xpEarned = demo || quickRace ? 0 : passed ? xpBase : Math.round(xpBase * (scorePct / 100));
+    const xpEarned = demo ? 0 : passed ? xpBase : Math.round(xpBase * (scorePct / 100));
 
     session.status = 'COMPLETED';
     session.completedAt = new Date();
     await session.save();
+
+    let starsGained = 0;
+    let coinsEarned = 0;
+    if (!demo && quickRace) {
+      starsGained = session.starsEarned;
+      coinsEarned = starsGained * 10;
+      if (xpEarned > 0) {
+        await awardXp({ userId: session.userId, organizationId: session.organizationId, amount: xpEarned, source: 'QUICK_RACE', note: 'Quick race' });
+        await contribute({ userId: session.userId, organizationId: session.organizationId, metric: 'XP', delta: xpEarned });
+      }
+      if (starsGained > 0) {
+        await User.increment({ stars: starsGained }, { where: { id: session.userId } });
+        await contribute({ userId: session.userId, organizationId: session.organizationId, metric: 'STARS', delta: starsGained });
+      }
+      if (coinsEarned > 0) {
+        await User.increment({ coins: coinsEarned }, { where: { id: session.userId } });
+      }
+    }
 
     if (!demo && !quickRace) {
       if (xpEarned > 0) {
@@ -541,7 +560,7 @@ export async function completeSession(sessionId: string) {
       });
     }
 
-    return { ...buildTournamentResult(session, rules, { scorePct, xpEarned, passed }), demo };
+    return { ...buildTournamentResult(session, rules, { scorePct, xpEarned, passed }), starsGained, coinsEarned, demo };
   }
 
   const total = session.questionOrder.length;

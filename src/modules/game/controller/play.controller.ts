@@ -270,7 +270,8 @@ export async function getMissionContent(req: Request, res: Response) {
 // Pass tournamentId to race FOR a joined tournament; normal races never count.
 // Pass missionBundleId when the mission was launched FROM its bundle — only
 // those races feed bundle progress (standalone mission races never do).
-// Neither missionId nor tournamentId = quick race (randomized, nothing recorded).
+// Neither missionId nor tournamentId = quick race (randomized questions; earns
+// XP/stars/coins but records no mission or bundle progress).
 export async function createSession(req: Request, res: Response) {
   const { missionId, missionBundleId, avatarId, tournamentId } = req.body;
   const data = await startSession({
