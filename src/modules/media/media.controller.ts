@@ -23,13 +23,22 @@ export async function upload(req: Request, res: Response) {
   const file = (req as any).file;
   if (!file) throw AppError.badRequest('No file uploaded');
 
+  // Media rows belong to an organization. Tenant users always have one bound;
+  // a super admin must "act as" an organization first (org switcher) so the
+  // upload lands in a tenant's library instead of failing on the NOT NULL.
+  const organizationId = currentOrgId();
+  if (!organizationId) {
+    throw AppError.badRequest('Select an organization first (use the organization switcher) — media belongs to an organization.');
+  }
+
   const stored = await storage.put(file.buffer, {
     filename: file.originalname,
     mimeType: file.mimetype,
-    folder: currentOrgId() ?? 'shared',
+    folder: organizationId,
   });
 
   const media = await Media.create({
+    organizationId,
     type: req.body.type || inferType(file.mimetype),
     title: req.body.title || file.originalname,
     description: req.body.description,
@@ -46,6 +55,10 @@ export async function upload(req: Request, res: Response) {
 export async function list(req: Request, res: Response) {
   const where: any = {};
   if (req.query.type) where.type = req.query.type;
+  // Scope the library to the active organization (super admins with no acting
+  // org still see everything, matching the rest of the admin console).
+  const organizationId = currentOrgId();
+  if (organizationId) where.organizationId = organizationId;
   const items = await Media.findAll({ where, order: [['created_at', 'DESC']], limit: 200 });
   return ok(res, items);
 }

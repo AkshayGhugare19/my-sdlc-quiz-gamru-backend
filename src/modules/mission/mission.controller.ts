@@ -21,15 +21,42 @@ export async function listQuestions(req: Request, res: Response) {
 export async function attachQuestion(req: Request, res: Response) {
   const mission = await Mission.findByPk(req.params.id);
   if (!mission) throw AppError.notFound('Mission not found');
-  const [link] = await MissionQuestion.findOrCreate({
+  if (!req.body.questionId) throw AppError.badRequest('questionId is required');
+  const question = await Question.findByPk(req.body.questionId);
+  if (!question) throw AppError.notFound('Question not found');
+  // Upsert semantics: re-attaching an existing link updates it — this is how
+  // the builder toggles isPinned and reorders (findOrCreate alone silently
+  // ignored those updates, which made pin/attach look broken).
+  const existing: any = await MissionQuestion.findOne({
     where: { missionId: req.params.id, questionId: req.body.questionId },
-    defaults: {
-      missionId: req.params.id,
-      questionId: req.body.questionId,
-      orderIndex: req.body.orderIndex ?? 0,
-      isPinned: req.body.isPinned ?? false,
-      weight: req.body.weight ?? 1,
-    },
+  });
+  if (existing) {
+    const patch: any = {};
+    if (req.body.orderIndex !== undefined) patch.orderIndex = req.body.orderIndex;
+    if (req.body.isPinned !== undefined) patch.isPinned = req.body.isPinned;
+    if (req.body.weight !== undefined) patch.weight = req.body.weight;
+    if (Object.keys(patch).length) await existing.update(patch);
+    return ok(res, existing, 'Question updated');
+  }
+  // NEW links are capped by the mission's Question Count — the pool set when
+  // the mission was created is the intended size, so the builder can't grow it
+  // past the limit (updates above are exempt: pin/reorder must always work).
+  const limit = Number((mission as any).questionCount) || 0;
+  if (limit) {
+    const poolSize = await MissionQuestion.count({ where: { missionId: req.params.id } });
+    if (poolSize >= limit) {
+      throw AppError.badRequest(
+        `This mission's Question Count is ${limit} and ${poolSize} question${poolSize === 1 ? ' is' : 's are'} already attached. ` +
+          'Detach a question first, or raise the Question Count on the mission edit form to attach more.',
+      );
+    }
+  }
+  const link = await MissionQuestion.create({
+    missionId: req.params.id,
+    questionId: req.body.questionId,
+    orderIndex: req.body.orderIndex ?? 0,
+    isPinned: req.body.isPinned ?? false,
+    weight: req.body.weight ?? 1,
   });
   return created(res, link, 'Question attached');
 }

@@ -128,7 +128,17 @@ api.get('/tournaments/:id/rankings', ...authed, authorize('tournaments', 'view')
 // Organizations are platform-level (super/platform admins only).
 api.use('/organizations', crudRouter(Organization, { tenantScoped: false, searchable: ['name', 'slug'], beforeWrite: withSlug }));
 
-api.use('/departments', crudRouter(Department, { searchable: ['name', 'code'], order: [['name', 'ASC']] }));
+// Department code is promised as "auto-generated if blank" by the admin form —
+// generate it here (UPPER_SNAKE from the name) so a blank code never blocks a create.
+api.use(
+  '/departments',
+  crudRouter(Department, {
+    searchable: ['name', 'code'],
+    order: [['name', 'ASC']],
+    beforeWrite: (d: any) =>
+      d.code || !d.name ? d : { ...d, code: slugify(d.name).replace(/-/g, '_').toUpperCase() },
+  }),
+);
 api.use(
   '/users',
   crudRouter(User, {
@@ -274,7 +284,29 @@ const reconcileMissionQuestions = async (missionRow: any, body: any) => {
     i++;
   }
 };
-api.use('/missions', crudRouter(Mission, { filterable: ['missionBundleId', 'isPublished', 'difficulty'], searchable: ['title', 'slug'], order: [['order_index', 'ASC']], beforeWrite: withSlug, afterWrite: reconcileMissionQuestions }));
+// Guard: the race can only use questions that exist. If the form picked a
+// Question Category AND a Question Count, the count must not exceed the number
+// of ACTIVE questions in that category — otherwise the game comes up short at
+// play time (the discrepancy players see mid-race).
+const validateMissionQuestionCount = async (data: any) => {
+  const d = withSlug(data);
+  const category = typeof d.questionCategory === 'string' ? d.questionCategory.trim() : '';
+  const count = d.questionCount == null || d.questionCount === '' ? null : Number(d.questionCount);
+  if (category && count != null && !Number.isNaN(count)) {
+    const where: any = { category, isActive: true };
+    const orgId = currentOrgId();
+    if (orgId) where.organizationId = orgId;
+    const available = await Question.count({ where });
+    if (count > available) {
+      throw AppError.badRequest(
+        `Question Count is ${count} but the "${category}" category only has ${available} active question${available === 1 ? '' : 's'}. ` +
+          `Lower the count to ${available || 1} or add more questions to that category first.`,
+      );
+    }
+  }
+  return d;
+};
+api.use('/missions', crudRouter(Mission, { filterable: ['missionBundleId', 'isPublished', 'difficulty'], searchable: ['title', 'slug'], order: [['order_index', 'ASC']], beforeWrite: validateMissionQuestionCount, afterWrite: reconcileMissionQuestions }));
 // Questions carry their answer options inline (body.options: [{ id?, label,
 // isCorrect }]) — the racing lanes. Validated up front, reconciled after save.
 const SINGLE_ANSWER_TYPES = ['SINGLE_CHOICE', 'TRUE_FALSE', 'IMAGE_CHOICE', 'TIMED_QUESTION', 'VIDEO_QUESTION'];
