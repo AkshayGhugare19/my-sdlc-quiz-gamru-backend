@@ -83,8 +83,19 @@ export async function register(input: {
     organizationId = org.id;
   }
 
-  const existing = await User.findOne({ where: { email, organizationId } });
-  if (existing) throw AppError.conflict('A user with this email already exists');
+  const existing: any = await User.findOne({ where: { email, organizationId } });
+  if (existing) {
+    // Heal the retry-after-timeout flow: if a previous signup attempt created
+    // the account but the response never reached the client, a retry with the
+    // SAME credentials completes as a login instead of a dead-end conflict.
+    if (existing.status !== 'DISABLED' && (await verifyPassword(input.password, existing.passwordHash))) {
+      const accessToken = signAccessToken(existing);
+      const refreshToken = signRefreshToken(existing);
+      await persistRefresh(existing, refreshToken, {});
+      return { user: sanitize(existing), accessToken, refreshToken };
+    }
+    throw AppError.conflict('A user with this email already exists');
+  }
 
   // Public self-signup can only ever create a learner (EMPLOYEE) or GUEST —
   // elevated roles are assigned by an admin via user management.
@@ -109,14 +120,17 @@ export async function register(input: {
   //    without this, orgs created without content threw "Mission not found";
   // 2. assign the org's default avatar.
   if (user.organizationId) {
-    try {
-      await ensureDefaultGameContent(user.organizationId);
-    } catch (err) {
-      // Provisioning must never block a signup; the pillars endpoint self-heals.
-      console.error('Default content provisioning failed during signup:', err);
-    }
-    const avatar: any = await Avatar.findOne({ where: { organizationId: user.organizationId, isDefault: true } });
-    if (avatar) await PlayerAvatar.findOrCreate({ where: { userId: user.id }, defaults: { userId: user.id, avatarId: avatar.id } });
+    // Fire-and-forget: provisioning a fresh org's content can take longer than
+    // the client's request timeout, and it must never block the signup response
+    // (a timed-out signup made the retry fail with "email already exists").
+    // The pillars endpoint self-heals if the player arrives before it finishes.
+    ensureDefaultGameContent(user.organizationId)
+      .catch((err) => console.error('Default content provisioning failed during signup:', err))
+      .then(async () => {
+        const avatar: any = await Avatar.findOne({ where: { organizationId: user.organizationId, isDefault: true } });
+        if (avatar) await PlayerAvatar.findOrCreate({ where: { userId: user.id }, defaults: { userId: user.id, avatarId: avatar.id } });
+      })
+      .catch((err) => console.error('Default avatar assignment failed during signup:', err));
   }
 
   const accessToken = signAccessToken(user);
