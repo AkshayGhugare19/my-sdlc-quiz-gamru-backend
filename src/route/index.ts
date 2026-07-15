@@ -210,7 +210,10 @@ api.use(
   }),
 );
 api.use('/content-blocks', crudRouter(ContentBlock, { tenantScoped: false, filterable: ['courseId'], order: [['order_index', 'ASC']] }));
-api.use('/learning-paths', crudRouter(LearningPath, { searchable: ['title'], beforeWrite: withSlug }));
+// `type` (COURSE|MISSION|MISSION_BUNDLE|TOURNAMENT) is filterable so each entity
+// form can list only the paths meant for it (?type=MISSION). `points` (storyboard
+// panels) is a JSONB column and rides through withSlug untouched.
+api.use('/learning-paths', crudRouter(LearningPath, { filterable: ['type'], searchable: ['title'], beforeWrite: withSlug }));
 
 api.use(
   '/mission-bundles',

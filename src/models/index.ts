@@ -74,6 +74,13 @@ LearningPathItem.belongsTo(LearningPath, { foreignKey: 'learningPathId' });
 LearningPathItem.belongsTo(Course, { foreignKey: 'courseId' });
 LearningPathItem.belongsTo(MissionBundle, { foreignKey: 'missionBundleId' });
 
+// A learning path (a typed storyboard) can be attached to one entity of its
+// type — the "Select Learning Path" dropdown on that entity's create form.
+Course.belongsTo(LearningPath, { foreignKey: 'learningPathId', as: 'learningPath' });
+Mission.belongsTo(LearningPath, { foreignKey: 'learningPathId', as: 'learningPath' });
+MissionBundle.belongsTo(LearningPath, { foreignKey: 'learningPathId', as: 'learningPath' });
+Tournament.belongsTo(LearningPath, { foreignKey: 'learningPathId', as: 'learningPath' });
+
 // ── Course roadmap — a course REFERENCES reusable missions/bundles/tournaments
 // via join tables (LMS style). Content is never owned or duplicated: the same
 // mission/bundle/tournament can appear in any number of courses, and each keeps

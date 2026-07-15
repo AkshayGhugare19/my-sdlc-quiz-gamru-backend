@@ -11,6 +11,7 @@ import {
   CourseBundle,
   CourseTournament,
   ContentBlock,
+  LearningPath,
   Progress,
   GameSession,
   MissionAttempt,
@@ -286,7 +287,21 @@ export async function getMissionContent(req: Request, res: Response) {
     course = await Course.findByPk(mission.courseId);
     blocks = await ContentBlock.findAll({ where: { courseId: mission.courseId }, order: [['order_index', 'ASC']] });
   }
-  return ok(res, { mission: { id: mission.id, title: mission.title }, course, contentBlocks: blocks });
+  // Storyboard learning path attached to this mission (LearningPath.type = MISSION):
+  // its ordered `points` are the pre-race briefing panels the player sees.
+  let learningPath: any = null;
+  if (mission.learningPathId) {
+    const lp: any = await LearningPath.findByPk(mission.learningPathId);
+    if (lp) {
+      learningPath = {
+        id: lp.id,
+        title: lp.title,
+        description: lp.description,
+        points: Array.isArray(lp.points) ? lp.points : [],
+      };
+    }
+  }
+  return ok(res, { mission: { id: mission.id, title: mission.title }, course, contentBlocks: blocks, learningPath });
 }
 
 // POST /api/play/sessions — start a mission (returns token + first question + HUD).

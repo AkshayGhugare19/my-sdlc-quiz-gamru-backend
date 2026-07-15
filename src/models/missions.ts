@@ -15,6 +15,7 @@ MissionBundle.init(
     organizationId: { type: DataTypes.UUID, allowNull: false },
     title: { type: DataTypes.STRING, allowNull: false },
     slug: { type: DataTypes.STRING, allowNull: false },
+    learningPathId: DataTypes.UUID, // optional storyboard path (LearningPath.type = MISSION_BUNDLE)
     description: DataTypes.TEXT,
     coverUrl: DataTypes.STRING,
     unlockRule: DataTypes.JSONB,
@@ -54,6 +55,7 @@ Mission.init(
     organizationId: { type: DataTypes.UUID, allowNull: false },
     missionBundleId: DataTypes.UUID,
     courseId: DataTypes.UUID, // learning content shown before the race
+    learningPathId: DataTypes.UUID, // optional storyboard path (LearningPath.type = MISSION)
     title: { type: DataTypes.STRING, allowNull: false },
     slug: { type: DataTypes.STRING, allowNull: false },
     description: DataTypes.TEXT,

@@ -48,6 +48,7 @@ Course.init(
     difficulty: { type: DataTypes.STRING, defaultValue: 'MEDIUM' },
     estimatedMin: DataTypes.INTEGER,
     certificateTemplateId: DataTypes.UUID, // issued when the whole roadmap is completed
+    learningPathId: DataTypes.UUID, // optional storyboard path shown before the roadmap (LearningPath.type = COURSE)
     isPublished: { type: DataTypes.BOOLEAN, defaultValue: false },
     orderIndex: { type: DataTypes.INTEGER, defaultValue: 0 },
   },
@@ -151,8 +152,16 @@ LearningPath.init(
     organizationId: { type: DataTypes.UUID, allowNull: false },
     title: { type: DataTypes.STRING, allowNull: false },
     slug: { type: DataTypes.STRING, allowNull: false },
+    // Which kind of entity this path attaches to: COURSE | MISSION |
+    // MISSION_BUNDLE | TOURNAMENT. Decides which creation modal's
+    // "Select Learning Path" dropdown lists this path.
+    type: { type: DataTypes.STRING, allowNull: true },
     description: DataTypes.TEXT,
     coverUrl: DataTypes.STRING,
+    // Ordered storyboard panels shown before play — an array of
+    // { title, description, imageUrl, instructions } (the 6-panel chapter
+    // layout the admin builds with the "+ Add point" button).
+    points: { type: DataTypes.JSONB, allowNull: true, defaultValue: [] },
     isPublished: { type: DataTypes.BOOLEAN, defaultValue: false },
   },
   {

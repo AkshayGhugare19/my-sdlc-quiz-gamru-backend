@@ -70,6 +70,7 @@ Tournament.init(
     metric: { type: DataTypes.STRING, defaultValue: 'XP' }, // XP|SCORE|SPEED|STARS
     departmentId: DataTypes.UUID,
     missionBundleId: DataTypes.UUID,
+    learningPathId: DataTypes.UUID, // optional storyboard path (LearningPath.type = TOURNAMENT)
     startsAt: DataTypes.DATE,
     endsAt: DataTypes.DATE,
     rewardConfig: DataTypes.JSONB, // { "1": {xp, badgeId, coins}, ... }
