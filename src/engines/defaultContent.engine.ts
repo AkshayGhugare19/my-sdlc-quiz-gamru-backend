@@ -23,6 +23,7 @@ import {
   CourseBundle,
   CourseTournament,
   ContentBlock,
+  LearningPath,
   MissionBundle,
   Mission,
   Question,
@@ -185,6 +186,56 @@ const RANK_DEFS = [
   },
 ];
 
+// Storyboard "learning paths" — the panels players see before play. One per
+// attachable entity type (MISSION | MISSION_BUNDLE | TOURNAMENT | COURSE), each
+// with three meaningful points, so the Learning Paths page has a ready demo set.
+const LEARNING_PATH_DEFS = [
+  {
+    slug: 'mission-briefing-path',
+    title: 'Mission Briefing',
+    type: 'MISSION',
+    description: 'A three-panel briefing that primes players before a single mission race.',
+    points: [
+      { title: 'Your Objective', description: 'Every mission puts one workplace scenario in front of you. Read the goal before the lights go green.', imageUrl: '', instructions: 'Review the objective card, then tap Continue.' },
+      { title: 'Steer to Answer', description: 'Each question maps its answers onto road lanes. Steer your car into the lane you believe is correct.', imageUrl: '', instructions: 'Use ← / → to change lanes, then Space to lock it in.' },
+      { title: 'Beat the Clock', description: 'Correct answers add seconds and stars. Keep the streak alive before the timer runs out.', imageUrl: '', instructions: 'Aim for a Gold rating — 90% or higher.' },
+    ],
+  },
+  {
+    slug: 'pillar-onboarding-path',
+    title: 'Pillar Onboarding Journey',
+    type: 'MISSION_BUNDLE',
+    description: 'A three-panel journey that introduces a full pillar bundle of missions.',
+    points: [
+      { title: 'Welcome to the Pillar', description: 'A pillar groups several missions into one themed journey. Finish them all to earn the pillar badge.', imageUrl: '', instructions: 'Preview the missions inside this pillar.' },
+      { title: 'Progress Unlocks Rewards', description: 'Completing missions raises your stars, XP and coins, and moves the pillar progress bar forward.', imageUrl: '', instructions: 'Complete missions in order for the smoothest climb.' },
+      { title: 'Become a Champion', description: 'Clear the whole pillar to claim the completion certificate and a Champion badge.', imageUrl: '', instructions: 'Reach 100% to unlock your certificate.' },
+    ],
+  },
+  {
+    slug: 'tournament-warmup-path',
+    title: 'Tournament Warm-Up',
+    type: 'TOURNAMENT',
+    description: 'A three-panel warm-up shown before a competitive tournament race.',
+    points: [
+      { title: 'Join the Grid', description: 'Tournaments pit you against the whole organization on a shared question track.', imageUrl: '', instructions: 'Join the tournament from your dashboard to enter.' },
+      { title: 'Race for the Metric', description: 'Standings are ranked by the tournament metric — XP, stars, score or speed. Play to that strength.', imageUrl: '', instructions: 'Check the metric badge before you start.' },
+      { title: 'Climb the Leaderboard', description: 'Top placements win the prize pool, and every correct answer moves you up the board in real time.', imageUrl: '', instructions: 'Finish in the top 3 to earn bonus rewards.' },
+    ],
+  },
+  {
+    slug: 'course-roadmap-path',
+    title: 'Course Roadmap Orientation',
+    type: 'COURSE',
+    description: 'A three-panel orientation shown before starting a course roadmap.',
+    points: [
+      { title: 'Your Learning Roadmap', description: 'A course strings missions, bundles and tournaments into one guided roadmap from start to finish.', imageUrl: '', instructions: 'Skim the roadmap to see what lies ahead.' },
+      { title: 'Learn, Then Race', description: 'Each stop mixes short learning content with a race, so knowledge sticks before you are tested.', imageUrl: '', instructions: 'Read each lesson before its race.' },
+      { title: 'Earn Your Certificate', description: 'Complete every stop on the roadmap to finish the course and unlock its certificate.', imageUrl: '', instructions: 'Reach the finish line to be certified.' },
+    ],
+  },
+];
+
 const BADGES = [
   { code: 'FIRST_MISSION', name: 'First Mission', criteria: { type: 'FIRST_MISSION' } },
   { code: 'PERFECT_SCORE', name: 'Perfect Score', criteria: { type: 'PERFECT_SCORE' } },
@@ -322,6 +373,26 @@ export async function ensureDefaultBadges(organizationId: string): Promise<SeedR
   return result;
 }
 
+export async function ensureDefaultLearningPaths(organizationId: string): Promise<SeedResult> {
+  const result: SeedResult = { added: 0, skipped: 0 };
+  for (const lp of LEARNING_PATH_DEFS) {
+    const [, created] = await LearningPath.findOrCreate({
+      where: { organizationId, slug: lp.slug },
+      defaults: {
+        organizationId,
+        title: lp.title,
+        slug: lp.slug,
+        type: lp.type,
+        description: lp.description,
+        points: lp.points,
+        isPublished: true,
+      },
+    });
+    created ? (result.added += 1) : (result.skipped += 1);
+  }
+  return result;
+}
+
 export async function ensureDefaultLeaderboards(organizationId: string): Promise<SeedResult> {
   const result: SeedResult = { added: 0, skipped: 0 };
   const boards = [
@@ -401,6 +472,7 @@ export const DEFAULTABLE_FEATURES = [
   'shop-items',
   'ranks',
   'badges',
+  'learning-paths',
   'leaderboards',
   'certificate-templates',
   'tournaments',
@@ -421,6 +493,8 @@ export async function seedFeatureDefaults(organizationId: string, feature: strin
       return ensureDefaultRanks(organizationId);
     case 'badges':
       return ensureDefaultBadges(organizationId);
+    case 'learning-paths':
+      return ensureDefaultLearningPaths(organizationId);
     case 'leaderboards':
       return ensureDefaultLeaderboards(organizationId);
     case 'certificate-templates':
