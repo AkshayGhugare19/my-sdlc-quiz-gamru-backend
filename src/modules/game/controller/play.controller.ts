@@ -103,6 +103,8 @@ export async function listPillars(req: Request, res: Response) {
     coverUrl: b.coverUrl,
     maxStars: b.maxStars,
     starReward: b.starReward,
+    // Storyboard briefing attached to this pillar (LearningPath.type = MISSION_BUNDLE).
+    learningPathId: b.learningPathId ?? null,
     progress: pMap.get(`MISSION_BUNDLE:${b.id}`) ?? null,
     missions: (b.missions ?? [])
       .sort((m1: any, m2: any) => m1.orderIndex - m2.orderIndex)
@@ -198,6 +200,8 @@ export async function listCourses(req: Request, res: Response) {
       color: c.color,
       difficulty: c.difficulty,
       estimatedMin: c.estimatedMin,
+      // Storyboard briefing attached to this course (LearningPath.type = COURSE).
+      learningPathId: c.learningPathId ?? null,
       completionPct: rollup.completionPct,
       completed: rollup.completed,
       hasCertificateTemplate: !!c.certificateTemplateId,
@@ -264,6 +268,7 @@ export async function listCourses(req: Request, res: Response) {
             startsAt: t.startsAt,
             endsAt: t.endsAt,
             prizes: t.rewardConfig ?? null,
+            learningPathId: t.learningPathId ?? null,
             joined: !!entry,
             requirementMet: item?.done ?? false,
             myScore: entry?.score ?? null,
@@ -277,7 +282,39 @@ export async function listCourses(req: Request, res: Response) {
   return ok(res, data);
 }
 
-// GET /api/play/missions/:id/content — the "Learn first" material shown before the race.
+// Which learning-path briefing to show for a mission play, decided by the ENTRY
+// CONTEXT (outermost wins):
+//   • course context (played through a course that HAS a path) → the course path,
+//     overriding any bundle/mission path inside it;
+//   • bundle context (played from a bundle) → the bundle's path — the mission's
+//     OWN path is never shown here (that only appears on direct play);
+//   • direct play → the mission's own path.
+// A broader context that has no path falls inward, but the mission's own path is
+// only reached when the play is effectively direct. All lookups are org-scoped.
+async function resolveEffectiveLearningPathId(
+  organizationId: string,
+  courseId: string | null,
+  bundleId: string | null,
+  mission: any,
+): Promise<string | null> {
+  if (courseId) {
+    const course: any = await Course.findByPk(courseId);
+    if (course && course.organizationId === organizationId && course.learningPathId) {
+      return course.learningPathId; // a course path overrides everything inside it
+    }
+    // course present but has no path → it doesn't impose a briefing; fall inward.
+  }
+  if (bundleId) {
+    const bundle: any = await MissionBundle.findByPk(bundleId);
+    if (bundle && bundle.organizationId === organizationId) return bundle.learningPathId ?? null;
+    return null; // bundle context (never the mission's own path)
+  }
+  return mission.learningPathId ?? null; // direct play
+}
+
+// GET /api/play/missions/:id/content — the "Learn first" material shown before the
+// race. `?missionBundleId=` / `?courseId=` carry the entry context so the right
+// briefing (course > bundle > mission) is resolved.
 export async function getMissionContent(req: Request, res: Response) {
   const mission: any = await Mission.findByPk(req.params.id);
   if (!mission) throw AppError.notFound('Mission not found');
@@ -287,12 +324,21 @@ export async function getMissionContent(req: Request, res: Response) {
     course = await Course.findByPk(mission.courseId);
     blocks = await ContentBlock.findAll({ where: { courseId: mission.courseId }, order: [['order_index', 'ASC']] });
   }
-  // Storyboard learning path attached to this mission (LearningPath.type = MISSION):
-  // its ordered `points` are the pre-race briefing panels the player sees.
+
+  const ctxCourseId = typeof req.query.courseId === 'string' ? req.query.courseId : null;
+  const ctxBundleId = typeof req.query.missionBundleId === 'string' ? req.query.missionBundleId : null;
+  const effectiveLpId = await resolveEffectiveLearningPathId(
+    req.user!.organizationId!,
+    ctxCourseId,
+    ctxBundleId,
+    mission,
+  );
+
+  // Its ordered `points` are the pre-race briefing panels the player sees.
   let learningPath: any = null;
-  if (mission.learningPathId) {
-    const lp: any = await LearningPath.findByPk(mission.learningPathId);
-    if (lp) {
+  if (effectiveLpId) {
+    const lp: any = await LearningPath.findByPk(effectiveLpId);
+    if (lp && lp.organizationId === req.user!.organizationId) {
       learningPath = {
         id: lp.id,
         title: lp.title,
@@ -302,6 +348,21 @@ export async function getMissionContent(req: Request, res: Response) {
     }
   }
   return ok(res, { mission: { id: mission.id, title: mission.title }, course, contentBlocks: blocks, learningPath });
+}
+
+// GET /api/play/learning-paths/:id — a single storyboard learning path (its
+// ordered `points`), scoped to the player's org. Powers the reusable briefing
+// screen a mission bundle / course / tournament links to before play.
+export async function getLearningPathContent(req: Request, res: Response) {
+  const lp: any = await LearningPath.findByPk(req.params.id);
+  if (!lp || lp.organizationId !== req.user!.organizationId) throw AppError.notFound('Learning path not found');
+  return ok(res, {
+    id: lp.id,
+    title: lp.title,
+    description: lp.description,
+    type: lp.type,
+    points: Array.isArray(lp.points) ? lp.points : [],
+  });
 }
 
 // POST /api/play/sessions — start a mission (returns token + first question + HUD).
@@ -392,6 +453,7 @@ export async function getDashboard(req: Request, res: Response) {
       starsEarned: bp?.starsEarned ?? 0,
       maxStars: b.maxStars,
       status: bp?.status ?? 'AVAILABLE',
+      learningPathId: b.learningPathId ?? null,
     };
   });
 
@@ -459,6 +521,8 @@ export async function getDashboard(req: Request, res: Response) {
       prizes: t.rewardConfig ?? null,
       winnerStarBonus: t.starReward ?? 0,
       joined: !!entry,
+      // Storyboard briefing attached to this tournament (LearningPath.type = TOURNAMENT).
+      learningPathId: t.learningPathId ?? null,
       // The player's live progress in this tournament (racing updates it).
       myScore: entry?.score ?? null,
       myStars: entry?.starsEarned ?? null,

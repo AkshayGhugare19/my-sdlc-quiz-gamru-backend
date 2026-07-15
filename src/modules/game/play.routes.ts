@@ -47,6 +47,7 @@ router.get('/shop', asyncHandler(play.getShop));
 router.get('/accessories-shop', asyncHandler(play.getAccessoriesShop));
 router.post('/shop/:id/buy', asyncHandler(play.buyShopItem));
 router.get('/missions/:id/content', asyncHandler(play.getMissionContent));
+router.get('/learning-paths/:id', asyncHandler(play.getLearningPathContent));
 
 router.post('/sessions', validate(startSchema), asyncHandler(play.createSession));
 router.get('/sessions/:id', asyncHandler(play.sessionState));
