@@ -45,7 +45,7 @@ export function createApp() {
   // Serve locally-stored uploads in dev (STORAGE_DRIVER=local).
   app.use('/uploads', express.static(path.resolve(process.cwd(), env.storage.localDir)));
 
-  app.get('/health', (_req, res) => res.json({ status: 'ok', service: 'GamifiedLearning', time: new Date().toISOString() }));
+  app.get('/health', (_req, res) => res.json({ status: 'ok', service: 'Gamru', time: new Date().toISOString() }));
 
   app.use('/api', apiLimiter, apiRoutes);
 

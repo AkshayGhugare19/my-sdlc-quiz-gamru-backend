@@ -1,4 +1,4 @@
-# CLAUDE.md — GamifiedLearning backend
+# CLAUDE.md — Gamru backend
 
 Gamification-engine API for the "SDLC Quest" corporate-learning platform.
 Node + Express 4 + Sequelize 6 (Postgres, UUID PKs, snake_case) + TypeScript + Socket.io.

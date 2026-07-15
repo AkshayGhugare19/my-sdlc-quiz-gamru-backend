@@ -16,7 +16,7 @@ async function bootstrap() {
   initSocket(server);
 
   server.listen(env.port, () => {
-    logger.info(`GamifiedLearning  API listening on ${env.publicUrl} (port ${env.port})`);
+    logger.info(`Gamru  API listening on ${env.publicUrl} (port ${env.port})`);
   });
 
   const shutdown = async () => {

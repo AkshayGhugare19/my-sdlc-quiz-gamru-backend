@@ -45,7 +45,7 @@ export async function login(
   const role = normalizeRole(user.role);
   if (audience === 'GAME' && !PLAYER_ROLES.has(role)) {
     throw AppError.forbidden(
-      `The game is for players only — your ${role} account signs in on the GamifiedLearningadmin console instead.`,
+      `The game is for players only — your ${role} account signs in on the Gamruadmin console instead.`,
     );
   }
   if (audience === 'CONSOLE' && PLAYER_ROLES.has(role)) {

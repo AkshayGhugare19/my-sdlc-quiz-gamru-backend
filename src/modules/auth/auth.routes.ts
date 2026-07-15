@@ -26,7 +26,7 @@ const registerSchema = Joi.object({
   role: Joi.string().valid('EMPLOYEE', 'GUEST').optional(),
 }).or('organizationId', 'organizationSlug');
 
-// ── Admin console auth (GamifiedLearningfrontend) — staff roles only ──────────────
+// ── Admin console auth (Gamrufrontend) — staff roles only ──────────────
 // EMPLOYEE/GUEST accounts are rejected here with a pointer to the game.
 router.post('/login', authLimiter, validate(loginSchema), asyncHandler(auth.login));
 

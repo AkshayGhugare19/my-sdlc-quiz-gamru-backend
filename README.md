@@ -1,6 +1,6 @@
 # sdlc-quiz-gamru-backend
 
-GamifiedLearning engine API — Node + Express + Sequelize (Postgres) + TypeScript.
+Gamru engine API — Node + Express + Sequelize (Postgres) + TypeScript.
 Serves **two clients**: the admin console (`sdlc-quiz-gamru-frontend`, staff roles)
 and the racing game (`sdlc-quiz-game-frontend`, EMPLOYEE / GUEST players).
 
