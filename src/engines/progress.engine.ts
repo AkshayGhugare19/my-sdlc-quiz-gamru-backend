@@ -10,6 +10,7 @@ import {
   CourseTournament,
   Tournament,
   TournamentEntry,
+  GameSession,
 } from '../models';
 
 export async function markProgress(params: {
@@ -85,8 +86,12 @@ export async function recomputeBundleProgress(userId: string, organizationId: st
  * progress records — the LMS rollup. A course never owns progress of its own:
  *  - a mission item is done when its STANDALONE progress (MISSION) is COMPLETED,
  *  - a bundle item is done when the bundle (MISSION_BUNDLE) is COMPLETED,
- *  - a tournament item is done when the player has an entry and has scored
- *    (or the tournament has been settled).
+ *  - a tournament item is done when the player has an entry and has PLAYED at
+ *    least one tournament race (or scored, or the tournament has been settled).
+ *    Participation is judged from the player's own persistent records
+ *    (TournamentEntry + completed tournament GameSessions), never from the
+ *    tournament's lifecycle status — so the item stays COMPLETED permanently
+ *    even after the tournament ends or expires.
  * Those records stay fully independent — this only READS them and writes the
  * separate COURSE row, so nothing ever overwrites anything else.
  * Returns per-item detail so player/admin UIs can show the roadmap.
@@ -105,16 +110,23 @@ export async function recomputeCourseProgress(userId: string, organizationId: st
   const bundleIds = (bundleLinks as any[]).map((l) => l.missionBundleId);
   const tournamentIds = (tournamentLinks as any[]).map((l) => l.tournamentId);
 
-  const [missionProgress, bundleProgress, entries, tournaments] = await Promise.all([
+  const [missionProgress, bundleProgress, entries, tournaments, playedSessions] = await Promise.all([
     missionIds.length ? Progress.findAll({ where: { userId, entityType: 'MISSION', entityId: missionIds } }) : [],
     bundleIds.length ? Progress.findAll({ where: { userId, entityType: 'MISSION_BUNDLE', entityId: bundleIds } }) : [],
     tournamentIds.length ? TournamentEntry.findAll({ where: { userId, tournamentId: tournamentIds } }) : [],
     tournamentIds.length ? Tournament.findAll({ where: { id: tournamentIds } }) : [],
+    tournamentIds.length
+      ? GameSession.findAll({
+          where: { userId, tournamentId: tournamentIds, status: 'COMPLETED' },
+          attributes: ['tournamentId'],
+        })
+      : [],
   ]);
   const mMap = new Map((missionProgress as any[]).map((p) => [p.entityId, p]));
   const bMap = new Map((bundleProgress as any[]).map((p) => [p.entityId, p]));
   const eMap = new Map((entries as any[]).map((e) => [e.tournamentId, e]));
   const tMap = new Map((tournaments as any[]).map((t) => [t.id, t]));
+  const playedSet = new Set((playedSessions as any[]).map((s) => s.tournamentId));
 
   const items = [
     ...missionIds.map((id) => {
@@ -128,7 +140,9 @@ export async function recomputeCourseProgress(userId: string, organizationId: st
     ...tournamentIds.map((id) => {
       const entry: any = eMap.get(id);
       const t: any = tMap.get(id);
-      const done = !!entry && ((entry.score ?? 0) > 0 || t?.status === 'COMPLETED');
+      // Joined + played once is enough — and permanent. score>0 and settled-
+      // tournament checks are kept so previously-done items never regress.
+      const done = !!entry && (playedSet.has(id) || (entry.score ?? 0) > 0 || t?.status === 'COMPLETED');
       return { kind: 'TOURNAMENT' as const, id, done, pct: done ? 100 : entry ? 50 : 0 };
     }),
   ];

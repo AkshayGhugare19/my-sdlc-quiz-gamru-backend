@@ -44,6 +44,7 @@ router.post('/garage/:accessoryId/equip', asyncHandler(play.equipAccessory));
 router.get('/team', asyncHandler(play.getTeam));
 router.post('/tournaments/:id/join', asyncHandler(play.joinTournament));
 router.get('/shop', asyncHandler(play.getShop));
+router.get('/accessories-shop', asyncHandler(play.getAccessoriesShop));
 router.post('/shop/:id/buy', asyncHandler(play.buyShopItem));
 router.get('/missions/:id/content', asyncHandler(play.getMissionContent));
 

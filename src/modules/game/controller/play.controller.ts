@@ -23,9 +23,11 @@ import {
   Tournament,
   TournamentEntry,
   IssuedCertificate,
+  CertificateTemplate,
   ShopItem,
   ShopOrder,
 } from '../../../models';
+import { Op } from 'sequelize';
 import { unlockAccessory } from '../../../engines/reward.engine';
 import { ensureDefaultGameContent } from '../../../engines/defaultContent.engine';
 import { startSession, getSessionState, submitAnswer, completeSession } from '../service/gameSession.service';
@@ -35,6 +37,22 @@ import { issueCertificate } from '../../../engines/certificate.engine';
 import { resolveRank } from '../../../engines/xp.engine';
 import { normalizeRole } from '../../../auth/permissions';
 import { MissionAccessoryReward } from '../../../models';
+
+// Certificate title configured by the org admin — prefers the template assigned
+// to a published pillar (bundle), else any of the org's templates. Null when the
+// org has none; the client falls back to its default label.
+async function resolveCertificateName(organizationId: string): Promise<string | null> {
+  const bundle: any = await MissionBundle.findOne({
+    where: { organizationId, isPublished: true, certificateTemplateId: { [Op.ne]: null } },
+    order: [['order_index', 'ASC']],
+  });
+  let tpl: any = bundle?.certificateTemplateId
+    ? await CertificateTemplate.findByPk(bundle.certificateTemplateId)
+    : null;
+  if (!tpl) tpl = await CertificateTemplate.findOne({ where: { organizationId }, order: [['created_at', 'ASC']] });
+  const name = tpl ? (tpl.layout?.title || tpl.name || null) : null;
+  return typeof name === 'string' ? name.replace(/\s+/g, ' ').trim() : null;
+}
 
 async function assertOwnedSession(req: Request) {
   const session: any = await GameSession.findByPk(req.params.id);
@@ -232,6 +250,10 @@ export async function listCourses(req: Request, res: Response) {
         .filter(Boolean)
         .map((t: any) => {
           const entry: any = entryMap.get(t.id);
+          // Roadmap requirement state from the rollup: once the player has
+          // joined + played, it stays COMPLETED forever, even after the
+          // tournament itself ends.
+          const item = rollup.items.find((i: any) => i.kind === 'TOURNAMENT' && i.id === t.id);
           return {
             id: t.id,
             name: t.name,
@@ -242,6 +264,7 @@ export async function listCourses(req: Request, res: Response) {
             endsAt: t.endsAt,
             prizes: t.rewardConfig ?? null,
             joined: !!entry,
+            requirementMet: item?.done ?? false,
             myScore: entry?.score ?? null,
             myStars: entry?.starsEarned ?? null,
             myPlacement: entry?.placement ?? null,
@@ -316,7 +339,7 @@ export async function getDashboard(req: Request, res: Response) {
   const user: any = await User.findByPk(userId);
   if (!user) throw AppError.notFound('User not found');
 
-  const [attempts, badges, garageCount, rank] = await Promise.all([
+  const [attempts, badges, garageCount, rank, certificateName] = await Promise.all([
     MissionAttempt.findAll({
       where: { userId },
       order: [['startedAt', 'DESC']],
@@ -325,6 +348,7 @@ export async function getDashboard(req: Request, res: Response) {
     UserBadge.findAll({ where: { userId }, include: [{ model: Badge }] }),
     GarageItem.count({ where: { userId } }),
     resolveRank(user.organizationId, user.totalXp),
+    resolveCertificateName(user.organizationId),
   ]);
 
   const passed = (attempts as any[]).filter((a) => a.status === 'PASSED');
@@ -398,6 +422,13 @@ export async function getDashboard(req: Request, res: Response) {
     TournamentEntry.findAll({ where: { userId } }),
   ]);
   const entryMap = new Map((myEntries as any[]).map((e) => [e.tournamentId, e]));
+  // Participation history from the player's own persistent entries — it must
+  // survive tournament settlement, or roadmap steps would flip back to pending
+  // the moment a finished tournament drops out of the open list above.
+  const tournamentHistory = {
+    joinedAny: (myEntries as any[]).length > 0,
+    scoredAny: (myEntries as any[]).some((e) => (e.score ?? 0) > 0),
+  };
   const tournaments = (openTournaments as any[]).map((t) => {
     const entry: any = entryMap.get(t.id);
     return {
@@ -434,6 +465,7 @@ export async function getDashboard(req: Request, res: Response) {
       demo: role === 'GUEST', // guest = demo account, no real rewards
       rank: rank ? { name: (rank as any).name, tier: (rank as any).tier, color: (rank as any).color } : null,
     },
+    certificateName,
     stats: {
       missionsCompleted,
       totalMissions,
@@ -445,6 +477,7 @@ export async function getDashboard(req: Request, res: Response) {
     pillars,
     missions,
     tournaments,
+    tournamentHistory,
     recentAttempts: (attempts as any[]).slice(0, 5).map((a) => ({
       missionTitle: a.Mission?.title ?? 'Mission',
       scorePct: a.scorePct,
@@ -531,14 +564,15 @@ export async function joinTournament(req: Request, res: Response) {
 }
 
 // GET /api/play/shop — active reward-shop items with the player's wallet and,
-// per item, whether they can afford / already own it.
+// per item, whether they can afford / already own it. Accessories are NOT
+// listed here — they live in their own Accessories Shop (/play/accessories-shop).
 export async function getShop(req: Request, res: Response) {
   const user: any = await User.findByPk(req.user!.id);
   if (!user) throw AppError.notFound('User not found');
 
   const [items, orders, garage] = await Promise.all([
     ShopItem.findAll({
-      where: { organizationId: user.organizationId, isActive: true },
+      where: { organizationId: user.organizationId, isActive: true, kind: { [Op.ne]: 'ACCESSORY' } },
       order: [['price_coins', 'ASC'], ['price_stars', 'ASC']],
     }),
     ShopOrder.findAll({ where: { userId: user.id, status: ['PENDING', 'FULFILLED'] } }),
@@ -563,6 +597,56 @@ export async function getShop(req: Request, res: Response) {
       owned: orderedItems.has(i.id) || (i.kind === 'ACCESSORY' && i.targetId && ownedAccessories.has(i.targetId)),
       canAfford: (user.coins ?? 0) >= (i.priceCoins ?? 0) && (user.stars ?? 0) >= (i.priceStars ?? 0),
     })),
+  });
+}
+
+// GET /api/play/accessories-shop — the dedicated Accessories Shop: ONLY
+// purchasable kart accessories. Just SHOP acquisition-type accessories are
+// listed — REWARD accessories are earned by playing and never sold here.
+// Bought accessories land straight in the player's Accessories Garage.
+export async function getAccessoriesShop(req: Request, res: Response) {
+  const user: any = await User.findByPk(req.user!.id);
+  if (!user) throw AppError.notFound('User not found');
+
+  const [listings, garage] = await Promise.all([
+    ShopItem.findAll({
+      where: { organizationId: user.organizationId, isActive: true, kind: 'ACCESSORY' },
+      order: [['price_coins', 'ASC'], ['price_stars', 'ASC']],
+    }),
+    GarageItem.findAll({ where: { userId: user.id }, attributes: ['accessoryId'] }),
+  ]);
+  const accessoryIds = (listings as any[]).map((l) => l.targetId).filter(Boolean);
+  const accessories = accessoryIds.length ? await Accessory.findAll({ where: { id: accessoryIds } }) : [];
+  const accessoryById = new Map((accessories as any[]).map((a) => [a.id, a]));
+  const owned = new Set((garage as any[]).map((g) => g.accessoryId));
+
+  const items = (listings as any[])
+    .map((i) => ({ listing: i, accessory: accessoryById.get(i.targetId) as any }))
+    // Hide stale listings for accessories that are no longer SHOP-acquired.
+    .filter(({ accessory }) => accessory && accessory.unlockType === 'SHOP')
+    .map(({ listing: i, accessory: a }) => ({
+      id: i.id,
+      accessoryId: a.id,
+      name: a.name,
+      description: i.description,
+      slot: a.slot,
+      rarity: a.rarity,
+      iconUrl: a.iconUrl,
+      imageUrl: i.imageUrl,
+      priceCoins: i.priceCoins ?? 0,
+      priceStars: i.priceStars ?? 0,
+      currency: (i.priceStars ?? 0) > 0 ? ((i.priceCoins ?? 0) > 0 ? 'COINS_AND_STARS' : 'STARS') : 'COINS',
+      stock: i.stock, // null = unlimited
+      soldOut: i.stock != null && i.stock <= 0,
+      purchaseLimit: 1, // accessories are unique — one copy per player
+      owned: owned.has(a.id),
+      canAfford: (user.coins ?? 0) >= (i.priceCoins ?? 0) && (user.stars ?? 0) >= (i.priceStars ?? 0),
+    }));
+
+  return ok(res, {
+    wallet: { coins: user.coins ?? 0, stars: user.stars ?? 0 },
+    demo: normalizeRole(user.role) === 'GUEST',
+    items,
   });
 }
 
@@ -593,6 +677,12 @@ export async function buyShopItem(req: Request, res: Response) {
   }
 
   if (item.kind === 'ACCESSORY' && item.targetId) {
+    // Reward accessories are earned by playing — never purchasable, even if a
+    // stale listing survived an acquisition-type change.
+    const accessory: any = await Accessory.findByPk(item.targetId);
+    if (accessory && accessory.unlockType !== 'SHOP') {
+      throw AppError.badRequest(`"${item.name}" is a reward accessory — earn it by playing, it can't be bought.`);
+    }
     const already = await GarageItem.findOne({ where: { userId: user.id, accessoryId: item.targetId } });
     if (already) throw AppError.badRequest(`"${item.name}" is already in your garage.`);
   }
@@ -751,6 +841,9 @@ export async function getGarage(req: Request, res: Response) {
       unlocked,
       isEquipped: ownedMap.get(a.id)?.isEquipped ?? false,
       unlockedAt: ownedMap.get(a.id)?.unlockedAt ?? null,
+      // How the player got it (SHOP | MISSION | SEED | DEFAULT) — lets the
+      // garage page label purchased vs rewarded gear.
+      source: ownedMap.get(a.id)?.source ?? null,
       // Only locked items need the plan; unlocked ones already tell their story.
       unlock: unlocked ? null : unlockPlan(a),
     };
@@ -803,10 +896,11 @@ export async function equipAccessory(req: Request, res: Response) {
 export async function getProfile(req: Request, res: Response) {
   const user: any = await User.findByPk(req.user!.id);
   if (!user) throw AppError.notFound('User not found');
-  const [garage, badges, rank] = await Promise.all([
+  const [garage, badges, rank, certificateName] = await Promise.all([
     GarageItem.findAll({ where: { userId: user.id }, include: [{ model: Accessory }] }),
     UserBadge.findAll({ where: { userId: user.id }, include: [{ model: Badge }] }),
     resolveRank(user.organizationId, user.totalXp),
+    resolveCertificateName(user.organizationId),
   ]);
   const role = normalizeRole(user.role);
   return ok(res, {
@@ -820,6 +914,7 @@ export async function getProfile(req: Request, res: Response) {
     role,
     demo: role === 'GUEST',
     rank: rank ? { name: (rank as any).name, tier: (rank as any).tier, color: (rank as any).color } : null,
+    certificateName,
     garage: (garage as any[]).map((g) => ({ accessoryId: g.accessoryId, isEquipped: g.isEquipped, accessory: g.Accessory })),
     badges: (badges as any[]).map((b) => b.Badge),
   });

@@ -486,6 +486,13 @@ const syncAccessoryUnlocks = async (row: any, body: any) => {
       },
     });
     if (!created) await listing.update({ name: row.name, priceCoins: price, isActive: true });
+  } else {
+    // Not sold (REWARD/DEFAULT): deactivate any leftover listing so the
+    // accessory can never surface in the accessories shop or be bought.
+    await ShopItem.update(
+      { isActive: false },
+      { where: { organizationId: row.organizationId, kind: 'ACCESSORY', targetId: row.id } },
+    );
   }
   // REWARD unlocks need a mission link: correct answers there can drop it.
   // Only reconciled when the form actually sent a mission (a blank/failed
