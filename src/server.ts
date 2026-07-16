@@ -6,6 +6,7 @@ import { assertDbConnection } from './config/db';
 import './models'; // initialise models + associations
 import { initSocket } from './realtime/socket';
 import { registerEventHandlers } from './events/registerHandlers';
+import { startKeepAliveCron, stopKeepAliveCron } from './cron/keepAlive.cron';
 
 async function bootstrap() {
   await assertDbConnection();
@@ -17,10 +18,12 @@ async function bootstrap() {
 
   server.listen(env.port, () => {
     logger.info(`Gamru  API listening on ${env.publicUrl} (port ${env.port})`);
+    startKeepAliveCron();
   });
 
   const shutdown = async () => {
     logger.info('Shutting down…');
+    stopKeepAliveCron();
     server.close(() => process.exit(0));
   };
   process.on('SIGINT', shutdown);
