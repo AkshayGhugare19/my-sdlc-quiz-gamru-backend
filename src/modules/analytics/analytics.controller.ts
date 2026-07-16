@@ -81,9 +81,38 @@ export async function hardestQuestions(_req: Request, res: Response) {
       [fn('SUM', literal('CASE WHEN is_correct THEN 0 ELSE 1 END')), 'wrong'],
     ],
     group: ['question_id'],
-    order: [[literal('wrong'), 'DESC']],
+    // hardest = only questions players actually got wrong; drop any with zero wrong answers.
+    having: literal('SUM(CASE WHEN is_correct THEN 0 ELSE 1 END) > 0'),
+    // rank by raw count of wrong answers (most-missed first), then wrong ratio as tie-breaker.
+    order: [
+      [literal('wrong'), 'DESC'],
+      [literal('CAST(SUM(CASE WHEN is_correct THEN 0 ELSE 1 END) AS FLOAT) / COUNT(id)'), 'DESC'],
+    ],
     raw: true,
     limit: 20,
   }).catch(() => []);
-  return ok(res, rows);
+
+  const ids = (rows as any[]).map((r) => r.questionId).filter(Boolean);
+  const questions: any[] = ids.length
+    ? await Question.findAll({
+        where: { id: { [Op.in]: ids } },
+        attributes: ['id', 'prompt', 'category'],
+        raw: true,
+      }).catch(() => [])
+    : [];
+  const byId = new Map(questions.map((q) => [q.id, q]));
+
+  const data = (rows as any[]).map((r) => {
+    const q = byId.get(r.questionId);
+    const total = Number(r.total) || 0;
+    const correct = Number(r.correct) || 0;
+    return {
+      ...r,
+      id: r.questionId,
+      prompt: q?.prompt ?? null,
+      category: q?.category ?? null,
+      correctRate: total ? Math.round((correct / total) * 100) : 0,
+    };
+  });
+  return ok(res, data);
 }
