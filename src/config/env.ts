@@ -18,6 +18,10 @@ function optional(key: string, fallback: string): string {
 
 const nodeEnv = optional('NODE_ENV', 'development');
 
+// Origins always allowed, on top of whatever CORS_ORIGINS holds. Baked in so deployed
+// frontends keep working without a dashboard env-var edit.
+const BUILT_IN_CORS_ORIGINS = ['https://quiz-nfs.netlify.app'];
+
 export const env = {
   nodeEnv,
   isProd: nodeEnv === 'production',
@@ -62,8 +66,13 @@ export const env = {
     },
   },
 
-  corsOrigins: optional('CORS_ORIGINS', 'http://localhost:5173,http://localhost:5273')
-    .split(',')
-    .map((s) => s.trim())
-    .filter(Boolean),
+  corsOrigins: Array.from(
+    new Set([
+      ...optional('CORS_ORIGINS', 'http://localhost:5173,http://localhost:5273')
+        .split(',')
+        .map((s) => s.trim())
+        .filter(Boolean),
+      ...BUILT_IN_CORS_ORIGINS,
+    ]),
+  ),
 };
