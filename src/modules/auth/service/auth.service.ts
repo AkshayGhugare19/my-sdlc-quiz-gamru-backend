@@ -1,7 +1,16 @@
+import crypto from 'node:crypto';
 import { Op } from 'sequelize';
-import { User, RefreshToken, Organization, Avatar, PlayerAvatar } from '../../../models';
+import {
+  User,
+  RefreshToken,
+  Organization,
+  Avatar,
+  PlayerAvatar,
+  AuthHandoffCode,
+} from '../../../models';
 import { ensureDefaultGameContent } from '../../../engines/defaultContent.engine';
 import { AppError } from '../../../utils/AppError';
+import { env } from '../../../config/env';
 import { normalizeRole } from '../../../auth/permissions';
 import { hashPassword, verifyPassword } from '../../../utils/password';
 import {
@@ -171,6 +180,87 @@ export async function me(userId: string) {
   const user: any = await User.findByPk(userId, { include: [{ model: Organization }] });
   if (!user) throw AppError.notFound('User not found');
   return sanitize(user);
+}
+
+// ── Unity iframe handoff ───────────────────────────────────────────────────
+// The website holds the access token in sessionStorage, which the cross-origin
+// Unity build cannot read. Instead of putting a token in the iframe URL (it
+// leaks via Referer, history and server logs, and stays valid for 15m), the
+// website mints a one-time code, passes THAT in the URL, and the game trades it
+// for freshly-minted tokens of its own. The code is worthless once redeemed or
+// after ~2 minutes.
+
+/** Step 1 (website, authenticated): mint a single-use code for the iframe URL. */
+export async function createHandoffCode(
+  userId: string,
+  meta: { ip?: string; userAgent?: string } = {},
+) {
+  const user: any = await User.findByPk(userId);
+  if (!user) throw AppError.unauthorized('User no longer exists');
+  if (user.status === 'DISABLED') throw AppError.forbidden('Account disabled');
+
+  // Opportunistic sweep — codes live for seconds, so this table must not grow
+  // unbounded. Same lazy-maintenance approach as tournament settlement (no cron).
+  await AuthHandoffCode.destroy({ where: { expiresAt: { [Op.lt]: new Date() } } }).catch((err) =>
+    console.error('Handoff code cleanup failed:', err),
+  );
+
+  const code = crypto.randomUUID();
+  const ttlSec = env.handoff.ttlSec;
+  const expiresAt = new Date(Date.now() + ttlSec * 1000);
+
+  await AuthHandoffCode.create({
+    userId: user.id,
+    organizationId: user.organizationId ?? null,
+    codeHash: hashToken(code),
+    expiresAt,
+    ip: meta.ip,
+    userAgent: meta.userAgent,
+  });
+
+  // Ready-to-use iframe src, so the caller never has to hand-build the query.
+  const gameUrl = new URL(env.handoff.gameUrl);
+  gameUrl.searchParams.set('code', code);
+
+  return { code, expiresAt, expiresInSec: ttlSec, gameUrl: gameUrl.toString() };
+}
+
+/** Step 2 (Unity, public): redeem the code from the URL for real tokens. */
+export async function redeemHandoffCode(
+  code: string,
+  meta: { ip?: string; userAgent?: string } = {},
+) {
+  const row: any = await AuthHandoffCode.findOne({ where: { codeHash: hashToken(code) } });
+  // One deliberately vague message for every failure mode below — an attacker
+  // guessing codes learns nothing about which ones exist.
+  const invalid = () => AppError.unauthorized('Invalid or expired handoff code');
+  if (!row) throw invalid();
+  if (row.consumedAt) throw invalid();
+  if (row.expiresAt < new Date()) throw invalid();
+
+  // Atomic single-use claim: `WHERE consumed_at IS NULL` matches for exactly one
+  // caller, so two concurrent exchanges of the same code can't both get tokens.
+  const [claimed] = await AuthHandoffCode.update(
+    {
+      consumedAt: new Date(),
+      consumedIp: meta.ip,
+      consumedUserAgent: meta.userAgent,
+    },
+    { where: { id: row.id, consumedAt: { [Op.is]: null } as any } },
+  );
+  if (!claimed) throw invalid();
+
+  const user: any = await User.findByPk(row.userId);
+  if (!user) throw AppError.unauthorized('User no longer exists');
+  if (user.status === 'DISABLED') throw AppError.forbidden('Account disabled');
+
+  // Fresh tokens rather than a copy of the website's — the game gets its own
+  // full-TTL session and its own revocable refresh token.
+  const accessToken = signAccessToken(user);
+  const refreshToken = signRefreshToken(user);
+  await persistRefresh(user, refreshToken, meta);
+
+  return { user: sanitize(user), accessToken, refreshToken };
 }
 
 /** Public list of joinable organizations (for the game signup screen). */

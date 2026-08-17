@@ -1,6 +1,6 @@
 // Central model registry + associations (gamru config/associations pattern).
 // Import this once at boot so every model is initialised and related.
-import { Organization, Department, User, RefreshToken } from './identity';
+import { Organization, Department, User, RefreshToken, AuthHandoffCode } from './identity';
 import {
   Media,
   Course,
@@ -63,6 +63,9 @@ User.belongsTo(Department, { foreignKey: 'departmentId' });
 
 User.hasMany(RefreshToken, { foreignKey: 'userId' });
 RefreshToken.belongsTo(User, { foreignKey: 'userId' });
+
+User.hasMany(AuthHandoffCode, { foreignKey: 'userId' });
+AuthHandoffCode.belongsTo(User, { foreignKey: 'userId' });
 
 // ── Content ───────────────────────────────────────────────────────────────
 Course.hasMany(ContentBlock, { foreignKey: 'courseId', as: 'contentBlocks' });
@@ -191,6 +194,7 @@ export const models = {
   Department,
   User,
   RefreshToken,
+  AuthHandoffCode,
   Media,
   Course,
   ContentBlock,

@@ -51,6 +51,18 @@ export async function permissions(req: Request, res: Response) {
   return ok(res, { role: normalizeRole(req.user!.role), abilities: abilitiesFor(req.user!.role) });
 }
 
+// Mint the one-time code the website puts in the Unity iframe's URL.
+export async function handoff(req: Request, res: Response) {
+  const data = await authService.createHandoffCode(req.user!.id, meta(req));
+  return created(res, data, 'Handoff code issued');
+}
+
+// Called from inside the Unity build with the `?code=` it found in its URL.
+export async function handoffExchange(req: Request, res: Response) {
+  const data = await authService.redeemHandoffCode(req.body.code, meta(req));
+  return ok(res, data, 'Signed in');
+}
+
 export async function organizations(_req: Request, res: Response) {
   return ok(res, await authService.listPublicOrganizations());
 }

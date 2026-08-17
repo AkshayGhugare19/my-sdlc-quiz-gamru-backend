@@ -47,6 +47,14 @@ export const env = {
     gameSessionSecret: required('GAME_SESSION_SECRET', 'dev-game-session-secret'),
   },
 
+  // One-time code that hands a signed-in session to the embedded Unity client.
+  // The TTL only has to cover "website mints the code → iframe boots → game
+  // exchanges it", so keep it in seconds, not minutes.
+  handoff: {
+    ttlSec: Number(optional('AUTH_HANDOFF_TTL_SEC', '120')),
+    gameUrl: optional('GAME_CLIENT_URL', 'https://quiz-nfs.netlify.app'),
+  },
+
   queue: {
     driver: optional('QUEUE_DRIVER', 'inline') as 'inline' | 'bullmq',
     redisUrl: optional('REDIS_URL', 'redis://localhost:6379'),
