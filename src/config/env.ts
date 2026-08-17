@@ -51,7 +51,7 @@ export const env = {
   // The TTL only has to cover "website mints the code → iframe boots → game
   // exchanges it", so keep it in seconds, not minutes.
   handoff: {
-    ttlSec: Number(optional('AUTH_HANDOFF_TTL_SEC', '120')),
+    ttlSec: Number(optional('AUTH_HANDOFF_TTL_SEC', '300')),
     gameUrl: optional('GAME_CLIENT_URL', 'https://quiz-nfs.netlify.app'),
   },
 
