@@ -16,10 +16,7 @@ export function createApp() {
   app.use(helmet({ crossOriginResourcePolicy: false }));
   app.use(
     cors({
-      origin: (origin, cb) => {
-        if (!origin || env.corsOrigins.includes(origin)) return cb(null, true);
-        return cb(null, env.corsOrigins.length === 0);
-      },
+      origin: true, // allow any origin, no restriction
       credentials: true,
     }),
   );

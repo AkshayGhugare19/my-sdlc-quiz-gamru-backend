@@ -5,14 +5,13 @@
 import type { Server as HttpServer } from 'node:http';
 import { Server as IOServer, Socket } from 'socket.io';
 import { verifyAccessToken } from '../utils/tokens';
-import { env } from '../config/env';
 import { logger } from '../utils/logger';
 
 let io: IOServer | null = null;
 
 export function initSocket(httpServer: HttpServer) {
   io = new IOServer(httpServer, {
-    cors: { origin: env.corsOrigins, credentials: true },
+    cors: { origin: true, credentials: true }, // allow any origin, no restriction
   });
 
   io.use((socket: Socket, next) => {
