@@ -43,6 +43,7 @@ export function createApp() {
   app.use('/uploads', express.static(path.resolve(process.cwd(), env.storage.localDir)));
 
   app.get('/health', (_req, res) => res.json({ status: 'ok', service: 'Gamru', time: new Date().toISOString() }));
+  app.get('/v1/api/health', (req, res) => res.json({ status: 'ok', service: 'Sdlc quiz backend', time: new Date().toISOString() }));
 
   app.use('/api', apiLimiter, apiRoutes);
 
