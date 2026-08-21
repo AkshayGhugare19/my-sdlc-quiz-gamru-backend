@@ -40,6 +40,7 @@ router.post('/login', authLimiter, validate(loginSchema), asyncHandler(auth.logi
 router.post('/game/login', authLimiter, validate(loginSchema), asyncHandler(auth.loginGame));
 router.post('/game/register', authLimiter, validate(registerSchema), asyncHandler(auth.register));
 router.get('/game/organizations', asyncHandler(auth.organizations)); // public, for the signup org picker
+router.get('/health', (_req, res) => res.json({ status: 'ok', service: 'Gamru', time: new Date().toISOString() }));
 
 // ── Unity iframe handoff (sessionStorage token → embedded game) ────────────
 // The website calls /handoff with its access token and gets a one-time code to
